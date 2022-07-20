@@ -26,6 +26,7 @@ class ContinualEvaluationPhasePlugin(StrategyPlugin):
                  tracking_plugins: List[TrackerPluginMetric],
                  max_task_subset_size=None,  # Max nb of iterations on task-datasets
                  eval_stream=None, eval_stream_task_labels=None,
+                 eval_max_iterations=None,
                  mb_update_freq=100,
                  num_workers=4, pin_memory=True, skip_unseen_tasks=True,
                  ):
@@ -66,6 +67,7 @@ class ContinualEvaluationPhasePlugin(StrategyPlugin):
         if self.eval_stream and self.eval_stream_task_labels is None:
             self.eval_stream_task_labels = list(range(len(self.eval_stream)))
 
+        self.eval_max_iterations = eval_max_iterations
         self.mb_update_freq = mb_update_freq
         self.num_workers = num_workers
         self.pin_memory = pin_memory
@@ -109,10 +111,17 @@ class ContinualEvaluationPhasePlugin(StrategyPlugin):
         self.set_subset_idxs()
 
         # Track only based on frequency or last in experience.
+        # Track only if not first experience and the given iteration by frequency is met, 
+        # or if its the last iteration of the epoch
         strategy.tracking_collector.is_tracking_iteration = (
-                strategy.clock.train_epoch_iterations % self.mb_update_freq == 0
-                or strategy.clock.train_epoch_iterations == len(strategy.dataloader))
-
+            strategy.clock.train_exp_counter > 0 
+            and (strategy.clock.train_epoch_iterations % self.mb_update_freq == 0 
+                and (strategy.clock.train_exp_iterations < self.eval_max_iterations or self.eval_max_iterations == -1)
+            )
+            or strategy.clock.train_epoch_iterations == (len(strategy.dataloader)-1)
+        )
+        #print("end epoch:", strategy.clock.train_epoch_iterations, len(strategy.dataloader),  
+        #    strategy.clock.train_epoch_iterations == len(strategy.dataloader))
         # Pass the very first step where no updates were performed yet
         if self.tracking_collector.is_first_preupdate_step:
             self.continual_eval_phase(strategy)
@@ -236,7 +245,7 @@ class ContinualEvaluationPhasePlugin(StrategyPlugin):
             if self.skip_unseen_tasks and task_label not in self.seen_tasks:
                 continue
 
-            strategy.optimizer.zero_grad()  # Zero grad to ensure no interference
+            #strategy.optimizer.zero_grad()  # Zero grad to ensure no interference
             strategy.is_training = True
             strategy.model.eval()  # Set to eval mode for BN/Dropout
             dataset = exp.dataset.eval()  # Set transforms
@@ -246,6 +255,7 @@ class ContinualEvaluationPhasePlugin(StrategyPlugin):
 
             # With or without grads forward
             if col.forward_with_grad:
+                strategy.optimizer.zero_grad()  # Zero grad to ensure no interference (only when forwarding with grads)
                 col.loss, col.post_update_features = self.forward_data(
                     dataset, strategy, task_label, collect_feats=col.collect_features, subset_idxs=subset_idxs)
                 col.loss.backward()
@@ -258,7 +268,9 @@ class ContinualEvaluationPhasePlugin(StrategyPlugin):
 
         # Reset grads for safety
         self.restore_strategy_(strategy, _prev_state, _prev_training_modes)
-        strategy.optimizer.zero_grad()  # Zero grad to ensure no interference
+        # Only reset the optimizer if we forwarded with grads
+        if col.forward_with_grad: 
+            strategy.optimizer.zero_grad() # Zero grad to ensure no interference
 
     @torch.no_grad()
     def _collect_exps_feats(self, strategy, eval_streams):

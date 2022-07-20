@@ -29,7 +29,7 @@ _default_test_transform = transforms.Compose([
 
 
 def SplitMiniImageNet(root_path, n_experiences=20, return_task_id=False, seed=0,
-                      fixed_class_order=None,
+                      fixed_class_order=None, per_exp_classes=None,
                       train_transform=_default_train_transform,
                       test_transform=_default_test_transform,
                       preprocessed=True):
@@ -76,6 +76,7 @@ def SplitMiniImageNet(root_path, n_experiences=20, return_task_id=False, seed=0,
         train_set, test_set = _get_mini_imagenet_dataset(root_path)
 
     if return_task_id:
+        print("SplitMiniImgnet - will return a MultiTaskScenario")
         return nc_benchmark(
             train_dataset=train_set,
             test_dataset=test_set,
@@ -83,7 +84,7 @@ def SplitMiniImageNet(root_path, n_experiences=20, return_task_id=False, seed=0,
             task_labels=True,
             seed=seed,
             fixed_class_order=fixed_class_order,
-            per_exp_classes=None,
+            per_exp_classes=per_exp_classes,
             class_ids_from_zero_in_each_exp=True,
             train_transform=train_transform,
             eval_transform=test_transform)
@@ -95,7 +96,7 @@ def SplitMiniImageNet(root_path, n_experiences=20, return_task_id=False, seed=0,
             task_labels=False,
             seed=seed,
             fixed_class_order=fixed_class_order,
-            per_exp_classes=None,
+            per_exp_classes=per_exp_classes,
             train_transform=train_transform,
             eval_transform=test_transform)
 

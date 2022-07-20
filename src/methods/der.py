@@ -9,6 +9,7 @@ import random
 import copy
 from pprint import pprint
 from typing import TYPE_CHECKING, Optional, List
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
@@ -23,6 +24,10 @@ from avalanche.training.storage_policy import ClassBalancedBuffer
 
 from src.utils import get_grad_normL2
 from src.eval.continual_eval import ContinualEvaluationPhasePlugin
+
+from avalanche.training.storage_policy import BalancedExemplarsBuffer, ReservoirSamplingBuffer
+from avalanche.benchmarks.utils import AvalancheDataset, AvalancheSubset, AvalancheConcatDataset
+
 
 if TYPE_CHECKING:
     from avalanche.training.strategies import BaseStrategy
@@ -54,7 +59,105 @@ class ACE_CE_Loss(nn.Module):
         self.seen_so_far = torch.cat([self.seen_so_far, labels]).unique()
         return
 
-class ERPlugin(StrategyPlugin):
+
+class DERClassBalancedBuffer(BalancedExemplarsBuffer):
+    """ Stores samples for replay, equally divided over classes.
+
+    There is a separate buffer updated by reservoir sampling for each
+        class.
+    It should be called in the 'after_training_exp' phase (see
+    ExperienceBalancedStoragePolicy).
+    The number of classes can be fixed up front or adaptive, based on
+    the 'adaptive_size' attribute. When adaptive, the memory is equally
+    divided over all the unique observed classes so far.
+    """
+
+    def __init__(self, max_size: int, adaptive_size: bool = True,
+                 total_num_classes: int = None):
+        """
+        :param max_size: The max capacity of the replay memory.
+        :param adaptive_size: True if mem_size is divided equally over all
+                            observed experiences (keys in replay_mem).
+        :param total_num_classes: If adaptive size is False, the fixed number
+                                  of classes to divide capacity over.
+        """
+        if not adaptive_size:
+            assert total_num_classes > 0, \
+                """When fixed exp mem size, total_num_classes should be > 0."""
+
+        super().__init__(max_size, adaptive_size, total_num_classes)
+        self.adaptive_size = adaptive_size
+        self.total_num_classes = total_num_classes
+        self.seen_classes = set()
+        
+        self.logits_buffer = {}
+
+
+    def update(self, strategy: "BaseStrategy", **kwargs):
+        print("DERReplay: Updating buffer")
+        new_data = strategy.experience.dataset
+        # TODO: make sure there is no transform active in the new_dataset!
+        
+        # Get sample idxs per class
+        cl_idxs = {}
+        for idx, target in enumerate(new_data.targets):
+            if target not in cl_idxs:
+                cl_idxs[target] = []
+            cl_idxs[target].append(idx)
+
+        # Make AvalancheSubset per class
+        cl_datasets = {}
+        for c, c_idxs in cl_idxs.items():
+            cl_datasets[c] = AvalancheSubset(new_data, indices=c_idxs)
+
+        # Update seen classes
+        self.seen_classes.update(cl_datasets.keys())
+
+        # associate lengths to classes
+        lens = self.get_group_lengths(len(self.seen_classes))
+        class_to_len = {}
+        for class_id, ll in zip(self.seen_classes, lens):
+            class_to_len[class_id] = ll
+
+        # update buffers with new data
+        for class_id, new_data_c in cl_datasets.items():
+            ll = class_to_len[class_id]
+            if class_id in self.buffer_groups:
+                old_buffer_c = self.buffer_groups[class_id]
+                old_buffer_c.update_from_dataset(new_data_c)
+                old_buffer_c.resize(strategy, ll)
+            else:
+                new_buffer = ReservoirSamplingBuffer(ll)
+                new_buffer.update_from_dataset(new_data_c)
+                self.buffer_groups[class_id] = new_buffer
+
+        # resize buffers
+        for class_id, class_buf in self.buffer_groups.items():
+            self.buffer_groups[class_id].resize(strategy,
+                                                class_to_len[class_id])
+        
+        # Add logits to targets for each cl_dataset
+        strategy.model.eval()
+        for class_id, class_buf in self.buffer_groups.items():
+            #print("id:", class_id, "ClassBuf:", class_buf.buffer) # class_buf.buffer is an AvalancheDataset
+            # if there is no entry for the class_id -> add its logits to the buffer
+            if not class_id in self.logits_buffer:
+                print("Preparing logits for class {}".format(class_id))
+                self.logits_buffer[class_id] = []
+                # Run through 'new_data' and compute the logits for each example
+                new_data_loader = DataLoader(class_buf.buffer, batch_size=1, shuffle=False) 
+                for i, data in tqdm(enumerate(new_data_loader)):
+                    img, _, _ = data
+                    img = img.to(strategy.device)
+                    logits = strategy.model.feature_extractor(img)
+                    logits = logits.detach().squeeze(0).cpu()
+                    self.logits_buffer[class_id].append(logits)
+            else:
+                print("Logits for class {} already exist".format(class_id))
+        strategy.model.train()
+        return        
+
+class DERPlugin(StrategyPlugin):
     """
     Rehearsal Revealed: replay plugin.
     Implements two modes: Classic Experience Replay (ER) and Experience Replay with Ridge Aversion (ERaverse).
@@ -77,7 +180,11 @@ class ERPlugin(StrategyPlugin):
         self.n_total_memories = n_total_memories  # Used dynamically
         self.num_tasks = num_tasks
         # a Dict<task_id, Dataset>
-        self.storage_policy = ClassBalancedBuffer(  # Samples to store in memory
+        # self.storage_policy = ClassBalancedBuffer(  # Samples to store in memory
+        #     max_size=self.n_total_memories,
+        #     adaptive_size=True,
+        # )
+        self.storage_policy = DERClassBalancedBuffer(
             max_size=self.n_total_memories,
             adaptive_size=True,
         )
@@ -97,6 +204,7 @@ class ERPlugin(StrategyPlugin):
 
         # Losses
         self.replay_criterion = torch.nn.CrossEntropyLoss()
+        self.der_criterion = torch.nn.MSELoss()
         self.use_ace_ce_loss = ace_ce_loss
         if self.use_ace_ce_loss:
             self.replay_criterion = ACE_CE_Loss(self.device)
@@ -146,7 +254,7 @@ class ERPlugin(StrategyPlugin):
         # Sample memory batch
         x_s, y_s, t_s = None, None, None
         if self.n_total_memories > 0 and len(self.storage_policy.buffer) > 0:  # Only sample if there are stored
-            x_s, y_s, t_s = self.load_buffer_batch(storage_policy=self.storage_policy, 
+            x_s, y_s, t_s, l_s = self.load_buffer_batch(storage_policy=self.storage_policy, 
                                         strategy=strategy, nb=strategy.train_mb_size)
         
         # Run forward for replayed data separately
@@ -156,11 +264,18 @@ class ERPlugin(StrategyPlugin):
         if x_s is not None:  
             assert y_s is not None
             assert t_s is not None
-           
+            assert l_s is not None
+            l_s = l_s.to(strategy.device)
+
             out = avalanche_forward(strategy.model, x_s, t_s)
-           
+            out_logits = strategy.model.last_features
+            print(out_logits.shape, l_s.shape)
+            
+            # TODO: Also calculate the DER loss, respectivley ONLY calculate the DER loss
+            self.replay_loss = self.der_criterion(out_logits, l_s)
+            import sys; sys.exit()  
             #loss = self.replay_criterion(out, y_s)
-            self.replay_loss = self.replay_criterion(out, y_s)
+            #self.replay_loss = self.replay_criterion(out, y_s)
             #loss *= ((1-self.lmbda)*2)  # apply weighting // the *2 is to make up for the lambda factor
             #self.replay_loss = loss
             #loss.backward() # backward is done in global backward -> loss is taken into account in 'before_backward'
@@ -204,20 +319,29 @@ class ERPlugin(StrategyPlugin):
         :param nb: Number of memories to return
         :return: input-space tensor, label tensor
         """
-        ret_x, ret_y, ret_t = None, None, None
+        ret_x, ret_y, ret_t, ret_l = None, None, None, None
         # Equal amount as batch: Last batch can contain fewer!
         n_exemplars = strategy.train_mb_size if nb is None else nb
-        new_dset = self.retrieve_random_buffer_batch(storage_policy, n_exemplars)  # Dataset object
+        new_dset, logits_set = self.retrieve_random_buffer_batch(storage_policy, n_exemplars)  # Dataset object
 
         # Load the actual data
+        logits_batch_start = 0
+        logits_batch_end = 0
         for sample in DataLoader(new_dset, batch_size=len(new_dset), pin_memory=True, shuffle=False):
             x_s, y_s = sample[0].to(strategy.device), sample[1].to(strategy.device)
             t_s = sample[-1].to(strategy.device)  # Task label (for multi-head)
+            
+            # logits_batch_end = logits_batch_start + len(y_s)
+            # l_s = logits_set[logits_batch_start:logits_batch_end]
+            # logits_batch_start = logits_batch_end
+            # in the current implementation, this is valid as well - if multiple batches are loaded use above
+            l_s = logits_set
 
             ret_x = x_s if ret_x is None else torch.cat([ret_x, x_s])
             ret_y = y_s if ret_y is None else torch.cat([ret_y, y_s])
             ret_t = t_s if ret_t is None else torch.cat([ret_t, t_s])
-        return ret_x, ret_y, ret_t
+            ret_l = l_s if ret_l is None else torch.cat([ret_l, l_s])
+        return ret_x, ret_y, ret_t, ret_l
 
     def retrieve_random_buffer_batch(self, storage_policy, n_samples):
         """
@@ -258,12 +382,18 @@ class ERPlugin(StrategyPlugin):
         # Actually sample
         s_cnt = 0
         subsets = []
+        logit_subsets = []
         for t, t_cnt in sample_cnt.items():
             if t_cnt > 0:
                 # Set of idxs
                 cnt_idxs = torch.randperm(len(storage_policy.buffer_group(t)))[:t_cnt]
                 sample_idxs = cnt_idxs.unsqueeze(1).expand(-1, 1)
                 sample_idxs = sample_idxs.view(-1)
+                
+                # Select the logits accoding to the same 'sample_idxs' set
+                logits_subset = torch.stack(storage_policy.logits_buffer[t])[sample_idxs]
+                print("logits_subset", logits_subset.shape)
+                logit_subsets.append(logits_subset)
 
                 # Actual subset
                 s = Subset(storage_policy.buffer_group(t), sample_idxs.tolist())
@@ -271,115 +401,6 @@ class ERPlugin(StrategyPlugin):
                 s_cnt += t_cnt
         assert s_cnt == tot_sample_cnt == max_samples
         new_dset = ConcatDataset(subsets)
+        logit_subsets = torch.cat(logit_subsets, dim=0)
 
-        return new_dset
-
-
-# class ERStrategy(BaseStrategy):
-#     """ Overwrite original BaseStrategy to enable avoiding loss reduction, getting the loss per sample."""
-
-#     def __init__(self,
-#                  n_total_memories,
-#                  num_tasks,
-#                  model, optimizer, criterion=torch.nn.CrossEntropyLoss(reduction='none'),
-#                  record_stability_gradnorm: bool = False,
-#                  Lw_new=0.5,  # Weighing of the new loss w.r.t. old loss
-#                  new_data_mb_size: int = 1, train_epochs: int = 1,
-#                  eval_mb_size: int = None, device=None,
-#                  plugins: Optional[List[StrategyPlugin]] = None,
-#                  evaluator: EvaluationPlugin = default_logger, eval_every=-1,
-#                  ):
-#         criterion.reduction = 'none'  # Overwrite
-
-#         # Checks
-#         assert criterion.reduction == 'none', "Must have per-sample losses available for ER."
-#         assert 0 <= Lw_new <= 1
-
-#         self.Lw_new = Lw_new
-#         self.record_stability_gradnorm = record_stability_gradnorm
-
-#         # Store/retrieve samples
-#         plug = ERPlugin(
-#             n_total_memories=n_total_memories,
-#             num_tasks=num_tasks,
-#         )
-#         if plugins is None:
-#             plugins = [plug]
-#         else:
-#             plugins = [plug] + plugins
-
-#         if isinstance(criterion, StrategyPlugin):
-#             plugins += [criterion]
-
-#         super().__init__(
-#             model, optimizer, criterion=criterion,
-#             train_mb_size=new_data_mb_size, train_epochs=train_epochs,
-#             eval_mb_size=eval_mb_size, device=device, plugins=plugins,
-#             evaluator=evaluator, eval_every=eval_every)
-
-#         # State vars
-#         self.loss_reg = None
-#         self.loss_new = None
-#         self.gradnorm_stab = None
-
-#     def training_epoch(self, **kwargs):
-
-#         for self.mbatch in self.dataloader:
-#             if self._stop_training:
-#                 break
-
-#             self._unpack_minibatch()
-#             nb_new_samples = self.mb_x.shape[0]
-#             self._before_training_iteration(**kwargs)
-
-#             self.optimizer.zero_grad()
-#             self.loss = 0
-
-#             # Forward
-#             self._before_forward(**kwargs)  # Loads memory samples
-#             self.mb_output = self.forward()
-#             self._after_forward(**kwargs)
-
-#             # Loss & Backward
-#             self.loss_batch = self.criterion()  # HERE UPDATED: NO PLUS, BUT NO-REDUCTION OPTION
-
-#             # Disentangle losses
-#             nb_samples = self.loss_batch.shape[0]
-
-#             # New loss
-#             mb_with_replay = False
-#             self.loss_new = self.Lw_new * self.loss_batch[:nb_new_samples].mean()
-#             self.loss = self.loss_new
-
-#             # Mem loss
-#             if nb_samples > nb_new_samples:
-#                 mb_with_replay = True
-#                 self.loss_reg = (1 - self.Lw_new) * self.loss_batch[nb_new_samples:].mean()
-#                 if self.record_stability_gradnorm:
-#                     self.get_stability_gradnorm(self.loss_reg)
-#                 self.loss = self.loss_new + self.loss_reg
-
-#             self._before_backward(**kwargs)
-#             self.loss.backward()
-#             self._after_backward(**kwargs)
-
-#             # Optimization step
-#             self._before_update(**kwargs)
-#             self.optimizer.step()
-#             self._after_update(**kwargs)
-
-#             self._after_training_iteration(**kwargs)
-
-#     def get_stability_gradnorm(self, loss_stab):
-#         """ Given the partial stability loss, return the gradient norm for this loss only. """
-#         _prev_state, _prev_training_modes = ContinualEvaluationPhasePlugin.get_strategy_state(self)
-
-#         # Set eval mode
-#         self.model.eval()
-
-#         loss_stab.backward(retain_graph=True)  # (Might have to reuse intermediate results, use retain_graph)
-#         self.gradnorm_stab = get_grad_normL2(self.model)  # Tracking
-
-#         # Restore training mode(s)
-#         # CAREFULL THIS IS BROKEN?
-#         #ContinualEvaluationPhasePlugin.restore_strategy_(se
+        return new_dset, logit_subsets

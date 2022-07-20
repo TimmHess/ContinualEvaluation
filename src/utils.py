@@ -5,9 +5,11 @@
 #  Codebase of paper "Continual evaluation for lifelong learning: Identifying the stability gap",
 #  publicly available at https://arxiv.org/abs/2205.13452
 
+from enum import unique
 from typing import Union, TYPE_CHECKING
 
 import torch
+
 from avalanche.training.plugins.strategy_plugin import StrategyPlugin
 from avalanche.models.dynamic_modules import MultiHeadClassifier
 

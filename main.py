@@ -137,6 +137,7 @@ parser.add_argument('--track_features', default=False, type=lambda x: bool(strto
                     help="Track the features before and after a single update. This is very expensive as "
                          "entire evaluation task dataset features are forwarded and stored twice in memory."
                          "Can be made more feasible with reducing 'eval_task_subset_size'.")
+parser.add_argument('--reduced_tracking', action='store_true', default=False, help='Use reduced tracking metrics.')
 
 # Strategy
 parser.add_argument('--strategy', type=str, default='ER',
@@ -255,8 +256,12 @@ def get_continual_evaluation_plugins(args, scenario):
 
     # Metrics
     loss_tracking = TaskTrackingLossPluginMetric()
-    gradnorm_tracking = TaskTrackingGradnormPluginMetric() if args.track_gradnorm else None  # Memory+compute expensive
-    featdrift_tracking = TaskTrackingFeatureDriftPluginMetric() if args.track_features else None  # Memory expensive
+    gradnorm_tracking = None
+    if args.track_gradnorm:
+        gradnorm_tracking = TaskTrackingGradnormPluginMetric() # if args.track_gradnorm else None  # Memory+compute expensive
+    featdrift_tracking = None
+    if args.track_featdrift:
+        featdrift_tracking = TaskTrackingFeatureDriftPluginMetric() # if args.track_features else None  # Memory expensive
 
     # Acc derived plugins
     acc_tracking = TaskTrackingAccuracyPluginMetric()
