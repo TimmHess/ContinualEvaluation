@@ -37,8 +37,6 @@ from src.eval.minibatch_logging import StrategyAttributeAdderPlugin, StrategyAtt
 import helper
 from cmd_parser import get_arg_parser
 
-import sys
-
 print("loading libs done..")
 
 
@@ -70,6 +68,7 @@ if not args.per_exp_classes_dict is None:
     print(args.per_exp_classes_dict)
     print("done...\n")
 
+
 '''
 Setup results directories
 '''
@@ -84,7 +83,7 @@ args.now = datetime.now().strftime("%Y.%m.%d-%H:%M")
 optim_str = "no_reset_optim"
 if args.reset_optim_each_exp:
     optim_str = "reset_optim"
-args.setupname = '_'.join([args.exp_name, args.strategy, args.backbone, str(args.lmbda), args.scenario, args.optim, optim_str, f"e={args.epochs}", args.now])
+args.setupname = '_'.join([args.exp_name, args.strategy, args.backbone, str(args.lmbda), args.scenario, args.optim, optim_str, f"e={args.epochs[0]}", args.now])
 args.results_path = Path(os.path.join(args.save_path, args.setupname)).resolve()
 args.eval_results_dir = args.results_path / 'results_summary'  # Eval results
 for path in [args.results_path, args.eval_results_dir]:
@@ -94,7 +93,7 @@ for path in [args.results_path, args.eval_results_dir]:
 '''
 Create Scenario
 '''
-scenario = helper.get_scenario(args, seed=args.seed)
+scenario, train_transform = helper.get_scenario(args, seed=args.seed)
 
 '''
 Create Logger
@@ -129,7 +128,8 @@ eval_plugin = EvaluationPlugin(*metrics, loggers=loggers, benchmark=scenario)
 Init Strategy
 '''
 strategy_plugins = [StrategyAttributeAdderPlugin(list(range(scenario.n_classes)))]
-strategy = helper.get_strategy(args, model, eval_plugin, scenario, device, plugins=strategy_plugins)
+strategy = helper.get_strategy(args, model, eval_plugin, scenario, device, 
+                plugins=strategy_plugins, train_transform=train_transform)
 
 '''
 Store args to tensorboard

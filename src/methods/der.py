@@ -165,7 +165,8 @@ class DERPlugin(StrategyPlugin):
     store_criteria = ['rnd']
 
     def __init__(self, n_total_memories, num_tasks, device,
-        lmbda: float, lmbda_warmup_steps=0, do_decay_lmbda=False, ace_ce_loss=False):
+        lmbda: float, lmbda_warmup_steps=0, do_decay_lmbda=False, ace_ce_loss=False,
+        train_transform=None):
         """
         Standard samples the same batch-size of new samples.
 
@@ -210,6 +211,9 @@ class DERPlugin(StrategyPlugin):
             self.replay_criterion = ACE_CE_Loss(self.device)
             self.ace_ce_loss = ACE_CE_Loss(self.device)
         self.replay_loss = 0
+
+        # Transform 
+        self.train_transform = train_transform
 
 
     def before_training_exp(self, strategy: 'BaseStrategy', **kwargs):
@@ -271,9 +275,9 @@ class DERPlugin(StrategyPlugin):
             out_logits = strategy.model.last_features
             print(out_logits.shape, l_s.shape)
             
-            # TODO: Also calculate the DER loss, respectivley ONLY calculate the DER loss
+            # Calculate the DER loss
             self.replay_loss = self.der_criterion(out_logits, l_s)
-            import sys; sys.exit()  
+            print(self.replay_loss)
             #loss = self.replay_criterion(out, y_s)
             #self.replay_loss = self.replay_criterion(out, y_s)
             #loss *= ((1-self.lmbda)*2)  # apply weighting // the *2 is to make up for the lambda factor
@@ -323,7 +327,7 @@ class DERPlugin(StrategyPlugin):
         # Equal amount as batch: Last batch can contain fewer!
         n_exemplars = strategy.train_mb_size if nb is None else nb
         new_dset, logits_set = self.retrieve_random_buffer_batch(storage_policy, n_exemplars)  # Dataset object
-
+        
         # Load the actual data
         logits_batch_start = 0
         logits_batch_end = 0
@@ -392,7 +396,7 @@ class DERPlugin(StrategyPlugin):
                 
                 # Select the logits accoding to the same 'sample_idxs' set
                 logits_subset = torch.stack(storage_policy.logits_buffer[t])[sample_idxs]
-                print("logits_subset", logits_subset.shape)
+                #print("logits_subset", logits_subset.shape)
                 logit_subsets.append(logits_subset)
 
                 # Actual subset
@@ -401,6 +405,10 @@ class DERPlugin(StrategyPlugin):
                 s_cnt += t_cnt
         assert s_cnt == tot_sample_cnt == max_samples
         new_dset = ConcatDataset(subsets)
+
+        # Apply train_transform also to replay data
+        new_dset.transform = self.train_transform
+
         logit_subsets = torch.cat(logit_subsets, dim=0)
 
         return new_dset, logit_subsets

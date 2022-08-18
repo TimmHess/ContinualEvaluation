@@ -9,15 +9,52 @@ from __future__ import division
 from turtle import forward
 
 from typing import List
+from collections import OrderedDict
 
 import math
 
 from torch import Tensor
 import torch
 import torch.nn as nn
-from torch.nn.functional import relu, avg_pool2d
+from torch.nn.functional import relu, avg_pool2d, max_pool2d
+
+from torchinfo import summary
 
 from avalanche.models.dynamic_modules import MultiHeadClassifier
+
+def get_feat_size(block, spatial_size, in_channels=3):
+    """
+    Function to infer spatial dimensionality in intermediate stages of a model after execution of the specified block.
+    Parameters:
+        block (torch.nn.Module): Some part of the model, e.g. the encoder to determine dimensionality before flattening.
+        spatial_size (int): Quadratic input's spatial dimensionality.
+        ncolors (int): Number of dataset input channels/colors.
+    Source: https://github.com/TimmHess/OCDVAEContinualLearning/blob/master/lib/Models/architectures.py
+    """
+
+    x = torch.randn(2, in_channels, spatial_size, spatial_size)
+    out = block(x)
+    num_feat = out.size(1)
+    spatial_dim_x = out.size(2)
+    spatial_dim_y = out.size(3)
+
+    return num_feat, spatial_dim_x, spatial_dim_y
+
+def initialize_weights(m) -> None:
+    """
+    Initilaize weights of model m.
+    """
+    if isinstance(m, nn.Conv2d):
+        nn.init.kaiming_uniform_(m.weight.data,nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.constant_(m.bias.data, 0)
+    elif isinstance(m, nn.BatchNorm2d):
+        nn.init.constant_(m.weight.data, 1)
+        nn.init.constant_(m.bias.data, 0)
+    elif isinstance(m, nn.Linear):
+        nn.init.kaiming_uniform_(m.weight.data)
+        nn.init.constant_(m.bias.data, 0)
+    return 
 
 
 '''
@@ -257,7 +294,9 @@ class MLPfeat(nn.Module):
         # x = self.classifier(x)
         return x
 
-
+'''
+ResNet
+'''
 class ResNet(nn.Module):
     """ ResNet feature extractor, slimmed down according to GEM paper."""
 
@@ -322,6 +361,133 @@ def ResNet18feat(input_size, nf=20, global_pooling=False):
 
 
 '''
+Wide ResNet
+'''
+class WRNBasicBlock(nn.Module):
+    """
+    Convolutional or transposed convolutional block consisting of multiple 3x3 convolutions with short-cuts,
+    ReLU activation functions and batch normalization.
+    """
+    def __init__(self, in_planes, out_planes, stride, batchnorm=1e-5, is_transposed=False):
+        super(WRNBasicBlock, self).__init__()
+
+        if is_transposed:
+            self.layer1 = nn.ConvTranspose2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1,
+                                             output_padding=int(stride > 1), bias=False)
+        else:
+            self.layer1 = nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(in_planes, eps=batchnorm)
+        self.relu1 = nn.ReLU(inplace=True)
+
+        self.conv2 = nn.Conv2d(out_planes, out_planes, kernel_size=3, stride=1, padding=1, bias=False)
+
+        self.bn2 = nn.BatchNorm2d(out_planes, eps=batchnorm)
+        self.relu2 = nn.ReLU(inplace=True)
+
+        self.useShortcut = ((in_planes == out_planes) and (stride == 1))
+        if not self.useShortcut:
+            if is_transposed:
+                self.shortcut = nn.ConvTranspose2d(in_planes, out_planes, kernel_size=1, stride=stride, padding=0,
+                                                   output_padding=int(1 and stride == 2), bias=False)
+            else:
+                self.shortcut = nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, padding=0, bias=False)
+        else:
+            self.shortcut = None
+
+    def forward(self, x):
+        if not self.useShortcut:
+            x = self.relu1(self.bn1(x))
+        else:
+            out = self.relu1(self.bn1(x))
+        out = self.relu2(self.bn2(self.layer1(out if self.useShortcut else x)))
+        out = self.conv2(out)
+
+        return torch.add(x if self.useShortcut else self.shortcut(x), out)
+
+
+class WRNNetworkBlock(nn.Module):
+    """
+    Convolutional or transposed convolutional block
+    """
+    def __init__(self, nb_layers, in_planes, out_planes, block_type, batchnorm=1e-5, stride=1,
+                 is_transposed=False):
+        super(WRNNetworkBlock, self).__init__()
+
+        if is_transposed:
+            self.block = nn.Sequential(OrderedDict([
+                ('convT_block' + str(layer + 1), block_type(layer == 0 and in_planes or out_planes, out_planes,
+                                                             layer == 0 and stride or 1, batchnorm=batchnorm,
+                                                             is_transposed=(layer == 0)))
+                for layer in range(nb_layers)
+            ]))
+        else:
+            self.block = nn.Sequential(OrderedDict([
+                ('conv_block' + str(layer + 1), block_type((layer == 0 and in_planes) or out_planes, out_planes,
+                                                           (layer == 0 and stride) or 1, batchnorm=batchnorm))
+                for layer in range(nb_layers)
+            ]))
+
+    def forward(self, x):
+        x = self.block(x)
+        return x
+
+
+class WRN(nn.Module):
+    """
+    Flexibly sized Wide Residual Network (WRN). Extended to the variational setting and to our unified model.
+    NOTE: Default values are taken from: https://github.com/MrtnMndt/OpenVAE_ContinualLearning/blob/master/lib/cmdparser.py
+    """
+    def __init__(self, input_size, use_bn=True, wrn_embedding_size=48, 
+            widen_factor=10, depth=14, use_max_pool=False):
+        super(WRN, self).__init__()
+
+        self.input_size = input_size
+        self.use_bn = 1e-5 if use_bn else 0.0
+        self.use_max_pool = use_max_pool
+
+        self.widen_factor = widen_factor
+        self.depth = depth
+        self.wrn_embedding_size = wrn_embedding_size
+
+        self.nChannels = [self.wrn_embedding_size, 16 * self.widen_factor, 32 * self.widen_factor,
+                          64 * self.widen_factor]
+
+        assert ((self.depth - 2) % 6 == 0)
+        self.num_block_layers = int((self.depth - 2) / 6)
+
+        self.encoder = nn.Sequential(OrderedDict([
+            ('encoder_conv1', nn.Conv2d(self.input_size[0], self.nChannels[0], kernel_size=3, stride=1, padding=1, bias=False)),
+            ('encoder_block1', WRNNetworkBlock(self.num_block_layers, self.nChannels[0], self.nChannels[1],
+                                               WRNBasicBlock, batchnorm=self.use_bn)),
+            ('encoder_block2', WRNNetworkBlock(self.num_block_layers, self.nChannels[1], self.nChannels[2],
+                                               WRNBasicBlock, batchnorm=self.use_bn, stride=2)),
+            ('encoder_block3', WRNNetworkBlock(self.num_block_layers, self.nChannels[2], self.nChannels[3],
+                                               WRNBasicBlock, batchnorm=self.use_bn, stride=2)),
+            ('encoder_bn1', nn.BatchNorm2d(self.nChannels[3], eps=self.use_bn)),
+            ('encoder_act1', nn.ReLU(inplace=True))
+        ]))
+
+        self.enc_channels, self.enc_spatial_dim_x, self.enc_spatial_dim_y = \
+            get_feat_size(self.encoder, self.input_size[1], self.input_size[0])
+
+        self.feature_size = self.enc_channels * self.enc_spatial_dim_x * self.enc_spatial_dim_y
+
+    def forward(self, x):
+        x = self.encoder(x)
+        
+        if self.use_max_pool:
+            x = max_pool2d(x, kernel_size=4)
+
+        x = x.view(x.size(0), -1) # Flatten
+        return x
+
+def WRNfeat(input_size, wrn_embedding_size=48, widen_factor=10, depth=14, 
+        use_bn=False, use_max_pool=False):
+    return WRN(input_size=input_size, wrn_embedding_size=wrn_embedding_size, 
+        widen_factor=widen_factor, depth=depth,
+        use_bn=use_bn, use_max_pool=use_max_pool)
+
+'''
 Classifier
 '''
 class FeatClassifierModel(torch.nn.Module):
@@ -339,10 +505,10 @@ class FeatClassifierModel(torch.nn.Module):
 
     def forward_feats(self, x):
         x = self.feature_extractor(x)
-        # store last computed features
-        self.last_features = x
         if self.with_adaptive_pool:
             x = self.avg_pool(x)
+        # store last computed features
+        self.last_features = x
         return x
 
     def forward_classifier(self, x, task_labels=None):
@@ -364,6 +530,9 @@ def get_model(args, n_classes):
     feat_extr = _get_feat_extr(args)  # Feature extractor
     classifier = _get_classifier(args, n_classes, feat_extr.feature_size)  # Classifier
     model = FeatClassifierModel(feat_extr, classifier)  # Combined model
+
+    print("\nBackbone Summary:")
+    summary(feat_extr, input_size=(1, args.input_size[0], args.input_size[1], args.input_size[1]))
     return model
 
 
@@ -381,6 +550,9 @@ def _get_feat_extr(args):
         feat_extr = VGG11Feat(input_size=args.input_size)
     elif args.backbone == "resnet18":
         feat_extr = ResNet18feat(nf=20, global_pooling=args.use_GAP, input_size=args.input_size)
+    elif args.backbone == 'wrn':
+        feat_extr = WRNfeat(args.input_size, wrn_embedding_size=args.wrn_embedding_size, widen_factor=args.wrn_widen_factor, 
+            depth=args.wrn_depth, use_bn=False, use_max_pool=args.use_maxpool)
     else:
         raise ValueError()
     #assert hasattr(feat_extr, 'feature_size'), "Feature extractor requires attribute 'feature_size'"
@@ -418,17 +590,28 @@ if __name__ == "__main__":
     x_miniimg = torch.rand((bs, 3, 84, 84))
     x_tinydomainnet = torch.rand((bs, 3, 96, 96))
 
-    # NO GAP
-    model = ResNet18feat(nf=20, global_pooling=False, input_size=None)
+    # # NO GAP
+    # model = ResNet18feat(nf=20, global_pooling=False, input_size=None)
 
-    cifar_shape = model.forward(x_cifar).shape  # 2560
-    mini_shape = model.forward(x_miniimg).shape  # 19360
-    tiny_shape = model.forward(x_tinydomainnet).shape  # 23040
+    # cifar_shape = model.forward(x_cifar).shape  # 2560
+    # mini_shape = model.forward(x_miniimg).shape  # 19360
+    # tiny_shape = model.forward(x_tinydomainnet).shape  # 23040
 
-    # WITH GAP
-    model = ResNet18feat(nf=20, global_pooling=True, input_size=None)
+    # # WITH GAP
+    # model = ResNet18feat(nf=20, global_pooling=True, input_size=None)
 
-    cifar_shape_gap = model.forward(x_cifar).shape  # 160
-    mini_shape_gap = model.forward(x_miniimg).shape  # 640
-    tiny_shape_gap = model.forward(x_tinydomainnet).shape  # 1440
+    # cifar_shape_gap = model.forward(x_cifar).shape  # 160
+    # mini_shape_gap = model.forward(x_miniimg).shape  # 640
+    # tiny_shape_gap = model.forward(x_tinydomainnet).shape  # 1440
 
+    # model = WRNfeat(input_size=(3,32,32), use_max_pool=True)
+    # shape = model.forward(x_cifar).shape
+    # print(shape)
+
+    # model = WRNfeat(input_size=(3,84,84), use_max_pool=True)
+    # shape = model.forward(x_miniimg).shape
+    # print(shape)
+
+    # model = WRNfeat(input_size=(3,96,96), use_max_pool=True)
+    # shape = model.forward(x_tinydomainnet).shape
+    # print(shape)

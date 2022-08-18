@@ -15,12 +15,14 @@ from src.utils import get_grad_normL2
 
 
 class FreezeBackbonePlugin(StrategyPlugin):
-    def __init__(self):
+    def __init__(self, exp_to_freeze_on=0):
         super().__init__()
+
+        self.exp_to_freeze_on = exp_to_freeze_on
         return
 
     def before_training_exp(self, strategy, **kwargs):
-        if strategy.clock.train_exp_counter > 0:
+        if strategy.clock.train_exp_counter > (self.exp_to_freeze_on -1): # NOTE: -1 is required to be able to freeze on the 0th experience
             print("\n\nFreezing backbone...\n\n")
             freeze_everything(strategy.model.feature_extractor)
         return

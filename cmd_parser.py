@@ -27,7 +27,7 @@ def get_arg_parser():
 
     # Dataset
     parser.add_argument('--scenario', type=str, default='smnist',
-                        choices=['smnist', 'cifar10', 'miniimgnet', 'minidomainnet', 'pmnist', 'rotmnist', 'digits'])
+                        choices=['smnist', 'cifar10', 'cifar100', 'miniimgnet', 'minidomainnet', 'pmnist', 'rotmnist', 'digits'])
     parser.add_argument('--dset_rootpath', default='./data', type=str,
                         help='Root path of the downloaded dataset for e.g. Mini-Imagenet')  # Mini Imagenet
     parser.add_argument('--partial_num_tasks', type=int, default=None,
@@ -41,9 +41,13 @@ def get_arg_parser():
     parser.add_argument('--featsize', type=int, default=400,
                         help='The feature size output of the feature extractor.'
                             'The classifier uses this embedding as input.')
-    parser.add_argument('--backbone', type=str, choices=['input', 'mlp', 'resnet18', 'cifar_mlp', 'simple_cnn', 'vgg11'], default='mlp')
+    parser.add_argument('--backbone', type=str, choices=['input', 'mlp', 'resnet18', 'wrn', 'cifar_mlp', 'simple_cnn', 'vgg11'], default='mlp')
     parser.add_argument('--use_GAP', default=True, type=lambda x: bool(strtobool(x)),
                         help="Use Global Avg Pooling after feature extractor (for Resnet18).")
+    parser.add_argument('--use_maxpool', action='store_true', default=False, help="Use maxpool after feature extractor (for WRN).")
+    parser.add_argument('--wrn_depth', type=int, default=14, help="Depth of the wide residual network.")
+    parser.add_argument('--wrn_widen_factor', type=int, default=10, help="Widen factor of the wide residual network.")
+    parser.add_argument('--wrn_embedding_size', type=int, default=48, help="Embedding size of the wide residual network.")
 
     # Classifier
     parser.add_argument('--classifier', type=str, choices=['linear', 'norm_embed', 'identity'], default='linear',
@@ -57,7 +61,9 @@ def get_arg_parser():
     parser.add_argument('--optim', type=str, choices=['sgd', 'adam'], default='sgd')
     parser.add_argument('--reset_optim_each_exp', action='store_true', default=False, help='Reset optimizer each exp.')
     parser.add_argument('--bs', type=int, default=128, help='Minibatch size.')
-    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs/step.')
+    #parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs/step.')
+    parser.add_argument('--epochs', type=int, nargs='+', default=[10], help='Number of epochs per experience. \
+        If len(epochs) != n_experiences, then the last epoch is used for the remaining experiences.')
     parser.add_argument('--iterations_per_task', type=int, default=None,
                         help='When this is defined, it overwrites the epochs per task.'
                             'This enables equal compute per task for imbalanced scenarios.')
@@ -95,6 +101,10 @@ def get_arg_parser():
                             "entire evaluation task dataset features are forwarded and stored twice in memory."
                             "Can be made more feasible with reducing 'eval_task_subset_size'.")
     parser.add_argument('--reduced_tracking', action='store_true', default=False, help='Use reduced tracking metrics.')
+    parser.add_argument('--use_lp_eval', action='store_true', default=False, help='Use Linear Probing in evaluation.')
+    parser.add_argument('--lp_eval_all', action='store_true', default=False, help='Use all tasks, always, for Linear Probing evaluation.')
+    parser.add_argument('--lp_finetune_epochs', type=int, default=5, help='Number of epochs to finetune Linear Probing.')
+
 
     # Strategy
     parser.add_argument('--strategy', type=str, default='finetune',
@@ -103,8 +113,6 @@ def get_arg_parser():
                                 'EWC', 'EWC_AGEM', 'EWC_separate', 'EWC_AGEM_separate',
                                 'finetune', # 'EWC_custom', 'LWF_custom',
                                 ])
-    # parser.add_argument('--task_incr', default=False, type=lambda x: bool(strtobool(x)),
-    #                     help="Give task ids during training to single out the head to the current task.")
     parser.add_argument('--task_incr', action='store_true', default=False,
                         help="Give task ids during training to single out the head to the current task.")
 
@@ -128,11 +136,12 @@ def get_arg_parser():
     parser.add_argument('--grad_clip', type=float, default=None, help='Gradient clipping.')
     # BackboneFreezing
     parser.add_argument('--freeze_backbone', action='store_true', default=False, help='Freeze backbone.')
+    parser.add_argument('--freeze_after_exp', type=int, default=0, help='Freeze backbone after experience n.')
     # Re-Initialize model after each experience
     parser.add_argument('--reinit_model', action='store_true', default=False, help='Re-initialize model after each experience.')
     # Add a linear-probing stage in-between experiences for the new task
-    parser.add_argument('--linear_probing', type=int, default=0, 
-        help='Add a linear-probing stage in-between experiences for the new task.')
+    # parser.add_argument('--linear_probing', type=int, default=0, 
+    #     help='Add a linear-probing stage in-between experiences for the new task.')
 
     # ER_AGEM_Custom
     parser.add_argument('--sample_size', default=0, type=int, 

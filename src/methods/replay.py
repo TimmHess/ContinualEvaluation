@@ -105,8 +105,6 @@ class ERPlugin(StrategyPlugin):
 
 
     def before_training_exp(self, strategy: 'BaseStrategy', **kwargs):
-        #import numpy as np
-        #print("num classes:", len(np.unique(strategy.experience.dataset.targets)))
         if strategy.clock.train_exp_counter > 0 and self.do_decay_lmbda:
             lmbda_decay_factor = (strategy.clock.train_exp_counter) / (strategy.clock.train_exp_counter+1)
             print("\nDecaying lmbda by:", lmbda_decay_factor)
@@ -119,14 +117,8 @@ class ERPlugin(StrategyPlugin):
         """
         Adjust the lmbda weighting according to lmbda warmup settings
         """
-        # Update ACE loss 'seen_so_far' attribute
-        # if self.use_ace_ce_loss:
-        #     self.replay_criterion.update_seen(strategy.mb_y)
-        #     print("\nreplay seen_so_far of replay loss:", self.replay_criterion.seen_so_far)
-        #     print("ace seen_so_far:", self.ace_ce_loss.seen_so_far)
-            
-
-        #lmbda_weighting stays 1.0 for the first experience
+        
+        # lmbda_weighting stays 1.0 for the first experience
         if strategy.clock.train_exp_counter > 0:
             self.last_iteration += 1
             #print("before_iteration:", self.last_iteration, self.lmbda_warmup_steps)
@@ -159,11 +151,8 @@ class ERPlugin(StrategyPlugin):
            
             out = avalanche_forward(strategy.model, x_s, t_s)
            
-            #loss = self.replay_criterion(out, y_s)
             self.replay_loss = self.replay_criterion(out, y_s)
-            #loss *= ((1-self.lmbda)*2)  # apply weighting // the *2 is to make up for the lambda factor
-            #self.replay_loss = loss
-            #loss.backward() # backward is done in global backward -> loss is taken into account in 'before_backward'
+            # NOTE: loss.backward() # backward is done in global backward -> loss is taken into account in 'before_backward'
         return
 
 

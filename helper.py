@@ -21,6 +21,7 @@ from torchvision import transforms
 # Avalanche
 from avalanche.logging import TextLogger, TensorboardLogger, WandBLogger
 from avalanche.benchmarks import SplitMNIST, SplitCIFAR10, RotatedMNIST, PermutedMNIST
+from avalanche.benchmarks.classic import SplitCIFAR100
 from avalanche.evaluation.metrics import ExperienceForgetting, StreamForgetting, accuracy_metrics, loss_metrics, \
     StreamConfusionMatrix, timing_metrics
 from avalanche.logging import InteractiveLogger
@@ -38,6 +39,7 @@ from src.eval.continual_eval_metrics import TaskTrackingLossPluginMetric, \
     TaskTrackingGradnormPluginMetric, TaskTrackingFeatureDriftPluginMetric, TaskTrackingAccuracyPluginMetric, \
     TaskAveragingPluginMetric, WindowedForgettingPluginMetric, \
     TaskTrackingMINAccuracyPluginMetric, TrackingLCAPluginMetric, WCACCPluginMetric, WindowedPlasticityPluginMetric
+from src.eval.linear_probing_metric import LinearProbingAccuracyMetric
 from src.eval.minibatch_logging import StrategyAttributeAdderPlugin, StrategyAttributeTrackerPlugin
 from src.utils import ExpLRSchedulerPlugin, IterationsInsteadOfEpochs
 from src.benchmarks.domainnet_benchmark import MiniDomainNetBenchmark
@@ -58,6 +60,7 @@ from src.methods.agem_bgd import AGEM_BGD
 from src.methods.agem_standard import AGEMPlugin
 from src.methods.er_geco import GECOERPlugin
 from src.methods.der import DERPlugin
+from src.methods.epoch_adapter import EpochLengthAdapterPlugin
 
 def args_to_tensorboard(writer, args):
     """
@@ -78,6 +81,9 @@ def args_to_tensorboard(writer, args):
 
 def get_scenario(args, seed):
     print(f"\n[SCENARIO] {args.scenario}, Task Incr = {args.task_incr}")
+
+    train_transform = None
+    test_transform = None
 
     if args.scenario == 'smnist':  #
         args.input_size = (1, 28, 28)
@@ -152,6 +158,39 @@ def get_scenario(args, seed):
         scenario.n_classes = n_classes
         args.initial_out_features = n_classes // n_experiences  # For Multi-Head
 
+    elif args.scenario == 'cifar100':
+        args.input_size = (3, 32, 32)
+        n_classes = 100
+        n_experiences = 10
+
+        # Init minimal transforms
+        minimal_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4865, 0.4409),
+                                (0.2673, 0.2564, 0.2762))
+        ])
+        # Init augmentation transforms (horizontal flip + random crop)
+        aug_transform = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4865, 0.4409),
+                                (0.2673, 0.2564, 0.2762))
+        ]) 
+        train_transform = minimal_transform
+        test_transform = minimal_transform
+
+        if args.advanced_data_aug:
+            train_transform = aug_transform
+
+
+        scenario = SplitCIFAR100(n_experiences=n_experiences, return_task_id=args.task_incr, seed=seed,
+                                fixed_class_order=[i for i in range(n_classes)],
+                                train_transform=train_transform,
+                                eval_transform=test_transform)
+        scenario.n_classes = n_classes
+        args.initial_out_features = n_classes // n_experiences
+
     elif args.scenario == 'miniimgnet':
         args.input_size = (3, 84, 84)
         n_classes = 100
@@ -181,7 +220,7 @@ def get_scenario(args, seed):
     scenario.test_stream = scenario.test_stream[: args.partial_num_tasks]
 
     print(f"Scenario = {args.scenario}")
-    return scenario
+    return scenario, train_transform
 
 
 def get_continual_evaluation_plugins(args, scenario):
@@ -296,6 +335,10 @@ def get_metrics(scenario, args):
         # MinibatchMaxRAM(),
         # GpuUsageMonitor(0),
     ]
+    if args.use_lp_eval:
+        print("\nAdding LP eval plugin")
+        metrics.append(LinearProbingAccuracyMetric(train_stream=scenario.train_stream, eval_all=args.lp_eval_all,
+            num_finetune_epochs=args.lp_finetune_epochs))
     return metrics
 
 def get_optimizer(args, model):
@@ -309,12 +352,15 @@ def get_optimizer(args, model):
         raise ValueError()
     return optimizer
 
-def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
+def get_strategy(args, model, eval_plugin, scenario, device, 
+            plugins=None, train_transform=None):
     plugins = [] if plugins is None else plugins
 
     # CRIT/OPTIM
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = get_optimizer(args, model)
+
+    initial_epochs = args.epochs[0]
 
     # lr-schedule over experiences
     # if args.lr_milestones is not None:
@@ -334,7 +380,7 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
     # STRATEGY
     if args.strategy == 'finetune':
         strategy = Naive(model, optimizer, criterion,
-                        train_epochs=args.epochs, device=device,
+                        train_epochs=initial_epochs, device=device,
                         train_mb_size=args.bs, evaluator=eval_plugin,
                         plugins=plugins
                         )
@@ -342,7 +388,7 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
     elif args.strategy == 'ER_avl':
         print("\n Using ER strategy")
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-        train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+        train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
         evaluator=eval_plugin, device=device,
         plugins=[ReplayPlugin(mem_size=args.mem_size)])
         
@@ -351,7 +397,7 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
         # if args.ace_ce_loss: 
         #         criterion = ACE_CE_Loss(device=device)
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-            train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+            train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
             evaluator=eval_plugin, device=device,
             plugins=[ERPlugin(n_total_memories=args.mem_size, num_tasks=scenario.n_experiences, device=device,
                 lmbda=args.lmbda, lmbda_warmup_steps=args.lmbda_warmup, do_decay_lmbda=args.do_decay_lmbda,
@@ -361,16 +407,16 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
     elif args.strategy == 'ER_GECO':
         print("\n Using ER_GECO strategy")
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-        train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+        train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
         evaluator=eval_plugin, device=device,
         plugins=[GECOERPlugin(n_total_memories=args.mem_size, num_tasks=scenario.n_experiences, device=device,
-            alpha=0.99, lagrange_update_set=1)]
+            alpha=0.99, lagrange_update_step=1)]
         ) 
 
     elif args.strategy == 'ER_orig':
         print("\n Using ER strategy")
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-        train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+        train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
         evaluator=eval_plugin, device=device,
         plugins=[ERPluginOrig(n_total_memories=args.mem_size, num_tasks=scenario.n_experiences,)]
         )
@@ -378,17 +424,21 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
     elif args.strategy == 'DER':
         print("\n Using DER strategy")
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-            train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+            train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
             evaluator=eval_plugin, device=device,
-            plugins=[DERPlugin(n_total_memories=args.mem_size, num_tasks=scenario.n_experiences, device=device,
-                lmbda=args.lmbda, lmbda_warmup_steps=args.lmbda_warmup, do_decay_lmbda=args.do_decay_lmbda,
-                ace_ce_loss=args.ace_ce_loss)]
+            plugins=[
+                DERPlugin(n_total_memories=args.mem_size, num_tasks=scenario.n_experiences, device=device,
+                    lmbda=args.lmbda, lmbda_warmup_steps=args.lmbda_warmup, do_decay_lmbda=args.do_decay_lmbda,
+                    ace_ce_loss=args.ace_ce_loss,
+                    train_transform=train_transform
+                )
+            ]
         )
 
 
     elif args.strategy == 'EWC':
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-            train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+            train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
             evaluator=eval_plugin, device=device,
             plugins=[EWCStandardPlugin(iw_strength=args.lmbda, 
             mode='online', keep_importance_data=False)]
@@ -396,7 +446,7 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
     
     elif args.strategy == 'EWC_separate':
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-            train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+            train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
             evaluator=eval_plugin, device=device,
             plugins=[EWCStandardPlugin(iw_strength=args.lmbda, 
             mode='separate', keep_importance_data=False)]
@@ -404,7 +454,7 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
     
     elif args.strategy == 'EWC_AGEM':
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-            train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+            train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
             evaluator=eval_plugin, device=device,
             plugins=[EWCStandardPlugin(iw_strength=args.lmbda, 
                         mode='online', keep_importance_data=False),
@@ -414,7 +464,7 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
     
     elif args.strategy == 'EWC_AGEM_separate':
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-            train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+            train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
             evaluator=eval_plugin, device=device,
             plugins=[EWCStandardPlugin(iw_strength=args.lmbda, 
                         mode='separate', keep_importance_data=False),
@@ -425,14 +475,14 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
 
     elif args.strategy == 'GEM':
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-        train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+        train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
         evaluator=eval_plugin, device=device,
         plugins=[GEMStandardPlugin(args.mem_size // scenario.n_experiences, args.gem_gamma)])
 
     elif args.strategy == 'AGEM_avl':
         print("\n Using AGEM_avl strategy")
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-        train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+        train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
         evaluator=eval_plugin, device=device,
         plugins=[AGEMPlugin(patterns_per_experience=args.mem_size//scenario.n_experiences,
                         sample_size=args.mem_size//scenario.n_experiences)])
@@ -440,7 +490,7 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
     elif args.strategy == 'AGEM':
         print("\n Using AGEM strategy")
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-        train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+        train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
         evaluator=eval_plugin, device=device,
         plugins=[AGEMPlugin(n_total_memories=args.mem_size, sample_size=args.sample_size,
                 lmbda=args.lmbda, lmbda_warmup_steps=args.lmbda_warmup)])
@@ -448,7 +498,7 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
     elif args.strategy == 'ER_AGEM':
         print("\n Using ER_AGEM_custom strategy")
         strategy = BaseStrategy(model, optimizer, criterion, train_mb_size=args.bs,
-        train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+        train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
         evaluator=eval_plugin, device=device,
         plugins=[ERAGEMPlugin(n_total_memories=args.mem_size, sample_size=args.sample_size,
             lmbda=args.lmbda, lmbda_warmup_steps=args.lmbda_warmup, do_decay_lmbda=args.do_decay_lmbda)])
@@ -456,7 +506,7 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
     elif args.strategy == 'AGEM_BGD':
         print("\nUsing AGEM_BGD strategy")
         strategy = AGEM_BGD(model, optimizer, criterion, train_mb_size=args.bs,
-        train_epochs=args.epochs, eval_mb_size=256, eval_every=-1, 
+        train_epochs=initial_epochs, eval_mb_size=256, eval_every=-1, 
         evaluator=eval_plugin, device=device, 
         plugins=[])
 
@@ -468,7 +518,15 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
         add_plugin = GradClipPlugin(clip_value=args.grad_clip)
         strategy.plugins.append(add_plugin)
     if args.freeze_backbone:
-        strategy.plugins.append(FreezeBackbonePlugin())
+        strategy.plugins.append(FreezeBackbonePlugin(exp_to_freeze_on=args.freeze_after_exp))
+
+    # Epoch length adapter
+    print("\nNum epochs:", len(args.epochs))
+    if len(args.epochs) > 1:
+        strategy.plugins.append(
+            EpochLengthAdapterPlugin(args.epochs)
+        )
+        print("Added EpochLengthAdapter!")
 
     # LRScheduler (warmup)
     if args.lr_warmup_steps > 0:
@@ -489,11 +547,11 @@ def get_strategy(args, model, eval_plugin, scenario, device, plugins=None):
         strategy.plugins.append(reinit_plugin)
         print("Added re-init plugin!")
     
-    if args.linear_probing > 0:
-        strategy.plugins.append(
-            LinearProbePlugin(num_epochs=args.linear_probing)
-        )
-        print("Added linear probing plugin!")
+    # if args.linear_probing > 0:
+    #     strategy.plugins.append(
+    #         LinearProbePlugin(num_epochs=args.linear_probing)
+    #     )
+    #     print("Added linear probing plugin!")
 
     print(f"Running strategy:{strategy}")
     if hasattr(strategy, 'plugins'):
