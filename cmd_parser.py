@@ -28,7 +28,7 @@ def get_arg_parser():
     # Dataset
     parser.add_argument('--scenario', type=str, default='smnist',
                         choices=['smnist', 'cifar10', 'cifar100', 'miniimgnet', 'minidomainnet', 'pmnist', 'rotmnist', 'digits'])
-    parser.add_argument('--dset_rootpath', default='./data', type=str,
+    parser.add_argument('--dset_rootpath', default=None, type=str, # NOTE: default='./data' (original code)
                         help='Root path of the downloaded dataset for e.g. Mini-Imagenet')  # Mini Imagenet
     parser.add_argument('--partial_num_tasks', type=int, default=None,
                         help='Up to which task to include, e.g. to consider only first 2 tasks of 5-task Split-MNIST')
@@ -36,12 +36,14 @@ def get_arg_parser():
                         help='Number of experiences to use in the scenario.')
     parser.add_argument('--per_exp_classes_dict', nargs='+', default=None, 
                         help='Dict of per-experience classes to control non uniform distribution of classes per task.')
+    parser.add_argument('--use_condor_sc_dir', action='store_true', default=False, help='Whether to use condor scratch dir.')
 
     # Feature extractor
     parser.add_argument('--featsize', type=int, default=400,
                         help='The feature size output of the feature extractor.'
                             'The classifier uses this embedding as input.')
     parser.add_argument('--backbone', type=str, choices=['input', 'mlp', 'resnet18', 'wrn', 'cifar_mlp', 'simple_cnn', 'vgg11'], default='mlp')
+    parser.add_argument('--show_backbone_param_names', action='store_true', default=False, help='Show parameter names of the backbone.')
     parser.add_argument('--use_GAP', default=True, type=lambda x: bool(strtobool(x)),
                         help="Use Global Avg Pooling after feature extractor (for Resnet18).")
     parser.add_argument('--use_maxpool', action='store_true', default=False, help="Use maxpool after feature extractor (for WRN).")
@@ -101,7 +103,8 @@ def get_arg_parser():
                             "entire evaluation task dataset features are forwarded and stored twice in memory."
                             "Can be made more feasible with reducing 'eval_task_subset_size'.")
     parser.add_argument('--reduced_tracking', action='store_true', default=False, help='Use reduced tracking metrics.')
-    parser.add_argument('--use_lp_eval', action='store_true', default=False, help='Use Linear Probing in evaluation.')
+    #parser.add_argument('--use_lp_eval', action='store_true', default=False, help='Use Linear Probing in evaluation.')
+    parser.add_argument('--use_lp_eval', type=str, default=None, choices=['linear', 'knn'], help='Usa a probing evaluation metric')
     parser.add_argument('--lp_eval_all', action='store_true', default=False, help='Use all tasks, always, for Linear Probing evaluation.')
     parser.add_argument('--lp_finetune_epochs', type=int, default=5, help='Number of epochs to finetune Linear Probing.')
 
@@ -137,8 +140,10 @@ def get_arg_parser():
     # BackboneFreezing
     parser.add_argument('--freeze_backbone', action='store_true', default=False, help='Freeze backbone.')
     parser.add_argument('--freeze_after_exp', type=int, default=0, help='Freeze backbone after experience n.')
+    parser.add_argument('--freeze_up_to', type=str, default=None, help='Freeze backbone up to layer name x.')
     # Re-Initialize model after each experience
     parser.add_argument('--reinit_model', action='store_true', default=False, help='Re-initialize model after each experience.')
+    parser.add_argument('--reinit_after', type=str, default=None, help='Reinit backbone after layer name x.')
     # Add a linear-probing stage in-between experiences for the new task
     # parser.add_argument('--linear_probing', type=int, default=0, 
     #     help='Add a linear-probing stage in-between experiences for the new task.')

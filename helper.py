@@ -3,17 +3,12 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-import math
+import shutil
 from pathlib import Path
 from typing import List
 import uuid
-import random
-import numpy
 import torch
-import datetime
-import argparse
 from distutils.util import strtobool
-import time
 
 from torch.optim.lr_scheduler import MultiStepLR, LinearLR
 from torchvision import transforms
@@ -30,6 +25,7 @@ from avalanche.training.plugins import GEMPlugin, AGEMPlugin
 from avalanche.training.strategies import Naive
 from avalanche.models.dynamic_modules import MultiHeadClassifier
 from avalanche.training.strategies.base_strategy import BaseStrategy
+from avalanche.benchmarks.datasets import default_dataset_location
 
 # CUSTOM
 from src.utils import MetricOverSeed
@@ -40,6 +36,7 @@ from src.eval.continual_eval_metrics import TaskTrackingLossPluginMetric, \
     TaskAveragingPluginMetric, WindowedForgettingPluginMetric, \
     TaskTrackingMINAccuracyPluginMetric, TrackingLCAPluginMetric, WCACCPluginMetric, WindowedPlasticityPluginMetric
 from src.eval.linear_probing_metric import LinearProbingAccuracyMetric
+from src.eval.knn_probing_metric import KNNProbingAccuracyMetric
 from src.eval.minibatch_logging import StrategyAttributeAdderPlugin, StrategyAttributeTrackerPlugin
 from src.utils import ExpLRSchedulerPlugin, IterationsInsteadOfEpochs
 from src.benchmarks.domainnet_benchmark import MiniDomainNetBenchmark
@@ -78,6 +75,40 @@ def args_to_tensorboard(writer, args):
     writer.add_text('command_line_parameters', txt, 0)
     return
 
+def get_condor_dataset_root(args, dset_name):
+    # If the scatch_dir is not used, return the original dataset root
+    if not args.use_condor_sc_dir:
+        return args.dset_rootpath
+
+    # Get the original dataset source
+    orig_dset_root = args.dset_rootpath
+    if args.dset_rootpath is None:
+        orig_dset_root = default_dataset_location(dset_name)
+    print("orig_dset_root: {}".format(orig_dset_root))
+    # Get the assigned scatch_dir location
+    condor_scratch_dir = os.environ.get('_CONDOR_SCRATCH_DIR', None)
+    print("scatch_dir is:", condor_scratch_dir)
+
+    # Define the dataset root on scatch dir
+    print("dset_name: {}".format(dset_name))
+    new_dset_root = os.path.join(condor_scratch_dir, dset_name)
+    print("new dset root on scatch dir:", new_dset_root)
+    print(condor_scratch_dir + "/" + dset_name)
+
+    # Check if the dataset was alreday downloaded in original root and transfers if true
+    if not orig_dset_root is None:
+        if os.path.exists(orig_dset_root):
+            if not os.path.exists(new_dset_root):    
+                print("Copying existing dataset to condor scatch dir...")
+                shutil.copytree(orig_dset_root, new_dset_root)
+                print("done...")
+            else:
+                print("Dataset already exists in condor scatch dir")
+                print("Do nothing...")
+    else:
+        print("No original dataset root! Please specify a dataset rootpath if avalanche automatic download fails...") 
+    return new_dset_root
+
 
 def get_scenario(args, seed):
     print(f"\n[SCENARIO] {args.scenario}, Task Incr = {args.task_incr}")
@@ -85,12 +116,18 @@ def get_scenario(args, seed):
     train_transform = None
     test_transform = None
 
+    # DEBUG: TODO: this has to be called in every scenario prior to creating it
+    # (sadly cannot be called upfront because need to map the "dataset_name" for original data root lookup from avalanche)
+    # new_dset_root = get_condor_dataset_root(args, "mnist")
+    # print("new dset root:", new_dset_root)
+
     if args.scenario == 'smnist':  #
         args.input_size = (1, 28, 28)
         n_classes = 10
         n_experiences = 5
+        new_dset_root = get_condor_dataset_root(args, "mnist")
         scenario = SplitMNIST(n_experiences=n_experiences, return_task_id=args.task_incr, seed=seed,
-                              fixed_class_order=[i for i in range(n_classes)])
+                              fixed_class_order=[i for i in range(n_classes)], dataset_root=new_dset_root)
         scenario.n_classes = n_classes
         args.initial_out_features = n_classes // n_experiences  # For Multi-Head
 
@@ -150,11 +187,12 @@ def get_scenario(args, seed):
         if args.advanced_data_aug:
             train_transform = aug_transform
 
-
+        new_dset_root = get_condor_dataset_root(args, "cifar10")
         scenario = SplitCIFAR10(n_experiences=n_experiences, return_task_id=args.task_incr, seed=seed,
                                 fixed_class_order=[i for i in range(n_classes)],
                                 train_transform=train_transform,
-                                eval_transform=test_transform)
+                                eval_transform=test_transform,
+                                dataset_root=new_dset_root)
         scenario.n_classes = n_classes
         args.initial_out_features = n_classes // n_experiences  # For Multi-Head
 
@@ -183,11 +221,12 @@ def get_scenario(args, seed):
         if args.advanced_data_aug:
             train_transform = aug_transform
 
-
+        new_dset_root = get_condor_dataset_root(args, "cifar100")
         scenario = SplitCIFAR100(n_experiences=n_experiences, return_task_id=args.task_incr, seed=seed,
                                 fixed_class_order=[i for i in range(n_classes)],
                                 train_transform=train_transform,
-                                eval_transform=test_transform)
+                                eval_transform=test_transform,
+                                dataset_root=new_dset_root)
         scenario.n_classes = n_classes
         args.initial_out_features = n_classes // n_experiences
 
@@ -197,12 +236,14 @@ def get_scenario(args, seed):
         n_experiences = 20
         if not args.num_experiences is None:
             n_experiences = args.num_experiences
-        scenario = SplitMiniImageNet(args.dset_rootpath, n_experiences=n_experiences, return_task_id=args.task_incr,
+
+        new_dset_root = get_condor_dataset_root(args, dset_name="miniimgnet")    
+        scenario = SplitMiniImageNet(new_dset_root, n_experiences=n_experiences, return_task_id=args.task_incr, # NOTE: args.dset_rootpath as first argument (original code)
                                      seed=seed, per_exp_classes=args.per_exp_classes_dict,
                                      fixed_class_order=[i for i in range(n_classes)], preprocessed=True)
         scenario.n_classes = n_classes
         args.initial_out_features = n_classes // n_experiences  # For Multi-Head
-       
+        
         # exp = scenario.train_stream[0].dataset
         # for exp in scenario.train_stream:
         #     dl = torch.utils.data.DataLoader(exp.dataset, batch_size=3, shuffle=True, num_workers=0)
@@ -336,9 +377,17 @@ def get_metrics(scenario, args):
         # GpuUsageMonitor(0),
     ]
     if args.use_lp_eval:
-        print("\nAdding LP eval plugin")
-        metrics.append(LinearProbingAccuracyMetric(train_stream=scenario.train_stream, eval_all=args.lp_eval_all,
-            num_finetune_epochs=args.lp_finetune_epochs))
+        print("\nAdding a probing eval plugin")
+        if args.use_lp_eval == "linear":
+            print("Using linear probe")
+            metrics.append(LinearProbingAccuracyMetric(train_stream=scenario.train_stream, eval_all=args.lp_eval_all,
+                num_finetune_epochs=args.lp_finetune_epochs)
+            )
+        elif args.use_lp_eval == "knn":
+            print("Using knn probe")
+            metrics.append(KNNProbingAccuracyMetric(train_stream=scenario.train_stream, eval_all=args.lp_eval_all,
+                num_classes=scenario.n_classes)
+            )
     return metrics
 
 def get_optimizer(args, model):
@@ -358,6 +407,9 @@ def get_strategy(args, model, eval_plugin, scenario, device,
 
     # CRIT/OPTIM
     criterion = torch.nn.CrossEntropyLoss()
+    if args.ace_ce_loss:
+        criterion = ACE_CE_Loss(device=device)
+        print("\nUsing ACE_CE_Loss")
     optimizer = get_optimizer(args, model)
 
     initial_epochs = args.epochs[0]
@@ -518,7 +570,10 @@ def get_strategy(args, model, eval_plugin, scenario, device,
         add_plugin = GradClipPlugin(clip_value=args.grad_clip)
         strategy.plugins.append(add_plugin)
     if args.freeze_backbone:
-        strategy.plugins.append(FreezeBackbonePlugin(exp_to_freeze_on=args.freeze_after_exp))
+        strategy.plugins.append(FreezeBackbonePlugin(
+            exp_to_freeze_on=args.freeze_after_exp,
+            freeze_up_to_layer_name=args.freeze_up_to)
+        )
 
     # Epoch length adapter
     print("\nNum epochs:", len(args.epochs))
@@ -543,7 +598,7 @@ def get_strategy(args, model, eval_plugin, scenario, device,
     
     # Re-Initialize Model (Only for an experiment concerning (A)GEM)
     if args.reinit_model:
-        reinit_plugin = ReInitBackbonePlugin()
+        reinit_plugin = ReInitBackbonePlugin(reinit_after_layer_name=args.reinit_after)
         strategy.plugins.append(reinit_plugin)
         print("Added re-init plugin!")
     

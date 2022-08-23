@@ -77,11 +77,6 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
             task_labels = strategy.mb_task_id
         else:
             task_labels = task_labels[0]
-        
-        # In task-incremental setting: Check that there is a head for the task label -> if not, skip evaluation
-        if isinstance(self.head_copy, MultiTaskModule):
-            if task_labels >= len(self.head_copy.classifiers):
-                return
     
         # Get representation of current mbatch from backbone
         x_rep = strategy.model.last_features.detach()
@@ -93,6 +88,7 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
             out = self.head_copy(x_rep)
         
         # Update the accuracy measure    
+        print(task_labels)
         self._accuracy.update(out, strategy.mb_y, task_labels)
         return
 
@@ -108,6 +104,14 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
                 print("\nPreparing Linear Probe(s)")
                 print("Initializing new head(s)...")
                 self.head_copy = copy.deepcopy(strategy.model.classifier)
+                # Check number of current heads against max numbre of heads possible
+                if isinstance(self.head_copy, MultiTaskModule):
+                    print(len(self.train_stream))
+                    if len(self.head_copy.classifiers) < len(self.train_stream):
+                        print("\nAdding new heads to Linear Probe")
+                        for exp in self.train_stream:
+                            self.head_copy.adaptation(exp.dataset)
+                self.head_copy = self.head_copy.to(strategy.device)
                 print("Reinitializing weights...")
                 initialize_weights(self.head_copy)
                 self.head_copy.train()
@@ -118,6 +122,7 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
                 # Prepare dataet and dataloader
                 if self.eval_all: # NOTE: Override the number of experiences to use in each step with max value
                     self.num_exps_seen = len(self.train_stream) -1 # -1 to make up for +1 in next step
+                    print("\nNum seen experiences is maxed out!")
                 curr_exp_data_stream = self.train_stream[:(self.num_exps_seen+1)]
                 curr_exp_data = []
                 for exp in curr_exp_data_stream:
@@ -141,6 +146,7 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
                         self.local_optim.zero_grad()
 
                         x, y, tid = mbatch[0], mbatch[1], mbatch[-1]
+
                         x = x.to(strategy.device)
                         y = y.to(strategy.device)
                         

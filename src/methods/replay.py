@@ -50,9 +50,9 @@ class ACE_CE_Loss(nn.Module):
         logits = mask
         return F.cross_entropy(logits, labels)
 
-    def update_seen(self, labels):
-        self.seen_so_far = torch.cat([self.seen_so_far, labels]).unique()
-        return
+    # def update_seen(self, labels):
+    #     self.seen_so_far = torch.cat([self.seen_so_far, labels]).unique()
+    #     return
 
 class ERPlugin(StrategyPlugin):
     """

@@ -533,6 +533,12 @@ def get_model(args, n_classes):
 
     print("\nBackbone Summary:")
     summary(feat_extr, input_size=(1, args.input_size[0], args.input_size[1], args.input_size[1]))
+    if args.show_backbone_param_names:
+        print("Modules:")
+        for module in feat_extr.named_modules():
+            print(module)
+        print("\nStopping execution here! Remove the 'show_backbone_param_names' flag to continue!")
+        import sys;sys.exit()
     return model
 
 
