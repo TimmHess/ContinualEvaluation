@@ -33,34 +33,71 @@ TResult = TypeVar('TResult')
     # in avalnache this could be, e.g. MinibatchAccuracy...
 
 class PrototypeKNNClassifier():
-    def __init__(self, num_classes=2, embedding_size=128, device='cpu'):
+    def __init__(self, num_classes=2, num_heads=1, embedding_size=128, device='cpu'):
         self.num_classes = num_classes
+        self.num_heads = num_heads
         self.embedding_size = embedding_size
-        self.prototypes = torch.zeros(num_classes, embedding_size).to(device)
+        self.device = device
+        #self.prototypes = torch.zeros(num_classes, embedding_size).to(device)
+        self.prototypes = self.reset()
         return
 
-    def accumulate_prototpyes(self, x, y):
+    def accumulate_prototpyes(self, x, y, tid=None):
         """
         x: torch.tensor of shape ([embedding_size])
         y: torch.tensor of shape (int)
+        tid: task_id (int)
         """
-        if torch.sum(self.prototypes[y]) == 0: # There is no prototype for this class yet
-            self.prototypes[y] = x
+        if self.num_heads > 1: # needs additional mapping into dict
+            tid = tid.item()
+            if torch.sum(self.prototypes[tid][y]) == 0: # There is no prototype for this class yet
+                self.prototypes[tid][y] += x
+            else:
+                self.prototypes[tid][y] = (self.prototypes[tid][y] + x) / 2
         else:
-            self.prototypes[y] = (self.prototypes[y] + x) / 2
+            if torch.sum(self.prototypes[y]) == 0: # There is no prototype for this class yet
+                self.prototypes[y] = x
+            else:
+                self.prototypes[y] = (self.prototypes[y] + x) / 2
         return
 
-    def reset(self):
-        self.prototypes = torch.zeros(self.num_classes, self.embedding_size)
-
-    def predict(self, x):
+    def predict(self, x, tid=None):
         """
         x: torch.tensor of shape ([batch_size, embedding_size])
+        tid: torch.tensor of shape ([int])
         """
-        x = torch.unsqueeze(x, dim=1) # Adding needed dummy dimension
-        out = torch.nn.functional.cosine_similarity(x, self.prototypes, dim=2)
-        out = torch.argmax(out, dim=1)
+        
+        if self.num_heads > 1:
+            unique_tasks = torch.unique(tid)
+            out = None
+            for task in unique_tasks:
+                task_mask = torch.where(tid==task)
+                x_task = x[task_mask]
+                x_task = torch.unsqueeze(x_task, dim=1)
+                
+                out_task = torch.nn.functional.cosine_similarity(x_task, 
+                    self.prototypes[task.item()], dim=2) # NOTE: task.item() to be able to use it as key(int) to dict    
+                out_task = torch.argmax(out_task, dim=1)
+            
+                if out is None:
+                    out = torch.empty(x.shape[0], *out_task.shape[1:],
+                                    device=out_task.device, dtype=torch.long)
+                out[task_mask] = out_task
+        else:
+            x = torch.unsqueeze(x, dim=1) # Adding needed dummy dimension
+            out = torch.nn.functional.cosine_similarity(x, self.prototypes, dim=2)
+            out = torch.argmax(out, dim=1)
         return out
+
+
+    def reset(self):
+        prototype = torch.zeros(self.num_classes, self.embedding_size).to(self.device)
+        prototypes = prototype
+        if self.num_heads > 1:
+            prototypes = {}
+            for i in range(self.num_heads):
+                prototypes[i] = prototype.clone()
+        return prototypes
 
 
 class KNNProbingAccuracyMetric(GenericPluginMetric[float]):
@@ -114,16 +151,15 @@ class KNNProbingAccuracyMetric(GenericPluginMetric[float]):
         else:
             task_labels = task_labels[0]
     
-        # TODO: implement prediction of knn for class-incremental
-        # TODO: implement prediction of knn for task-incremental
-            # (needs one knn classifier per task)
 
         # Get representation of batch
         x_rep = strategy.model.last_features.detach()
 
         # Get Prediciton from KNN_Classifier(s)
-        out = self.knn_classifier.predict(x_rep)
-        
+        out = self.knn_classifier.predict(x_rep, strategy.mb_task_id) # or should this be task_labels as well?
+        #print(out)
+        #print(strategy.mb_y)
+        #import sys;sys.exit()
         # Update the accuracy measure    
         self._accuracy.update(out, strategy.mb_y, task_labels)
         return
@@ -152,11 +188,19 @@ class KNNProbingAccuracyMetric(GenericPluginMetric[float]):
 
             # Initialize KNN Classifier(s)
             print("\nKnnClassifier:", num_curr_exp_targets, strategy.model.classifier.in_features)
-            self.knn_classifier = PrototypeKNNClassifier(
-                    num_classes=num_curr_exp_targets, 
+            if isinstance(strategy.model.classifier, MultiTaskModule): # NOTE: instantiate knn_classifier with multiple heads
+                self.knn_classifier = PrototypeKNNClassifier(
+                    num_classes=num_curr_exp_targets, # NOTE: this only works because all tasks start on class label 0!
+                    num_heads=len(self.train_stream), 
                     embedding_size=strategy.model.classifier.in_features,
                     device=strategy.device
-            )
+                )
+            else:
+                self.knn_classifier = PrototypeKNNClassifier(
+                        num_classes=num_curr_exp_targets, 
+                        embedding_size=strategy.model.classifier.in_features,
+                        device=strategy.device
+                )
             
             print("Collected dataset and loader...")
             # Accumulate the prototypes for each class according to ground truth labels
@@ -167,13 +211,14 @@ class KNNProbingAccuracyMetric(GenericPluginMetric[float]):
                 y = y.to(strategy.device)
                 # Get (l2-normalized) representations for current batch
                 x_rep = torch.nn.functional.normalize(strategy.model.feature_extractor(x).detach(), dim=1)
-                for l in torch.unique(y):
-                    #proto_l = torch.sum(x_rep[torch.where(y==l)], dim=0)
-                    proto_l = x_rep[torch.where(y==l)].mean(dim=0)
-                    #print("\n", proto_l)
-                    #print("proto shape", proto_l.shape)
-                    # Accumulate prototype for class l
-                    self.knn_classifier.accumulate_prototpyes(proto_l, l)
+                
+                for t in torch.unique(tid):
+                    for l in torch.unique(y):
+                        proto_l = x_rep[torch.where(tid==t) and torch.where(y==l)].mean(dim=0)
+                        #print("\n", proto_l)
+                        #print("proto shape", proto_l.shape)
+                        # Accumulate prototype for class l
+                        self.knn_classifier.accumulate_prototpyes(proto_l, l, t)
 
         super().before_eval_exp(strategy)
         if self._reset_at == 'experience' and self._mode == 'eval':

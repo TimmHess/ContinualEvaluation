@@ -83,7 +83,7 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
     
         # Forward representation through new head (linear probe)
         if isinstance(self.head_copy, MultiTaskModule): # NOTE: this is the avalanche_forward function copied
-            out = self.head_copy(x_rep, task_labels)
+            out = self.head_copy(x_rep, task_labels) # shouldn_t this be (x_rep, strategy.mb_task_id) ?
         else:  # no task labels
             out = self.head_copy(x_rep)
         
