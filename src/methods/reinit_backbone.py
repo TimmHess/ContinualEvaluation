@@ -18,9 +18,10 @@ class LayerAndParameter(NamedTuple):
     parameter: Tensor
 
 class ReInitBackbonePlugin(StrategyPlugin):
-    def __init__(self, reinit_after_layer_name=None):
+    def __init__(self, exp_to_reinit_on=0, reinit_after_layer_name=None):
         super().__init__()
 
+        self.exp_to_reinit_on = exp_to_reinit_on
         self.reinit_after_layer_name = reinit_after_layer_name
         return
 
@@ -32,7 +33,7 @@ class ReInitBackbonePlugin(StrategyPlugin):
         for layer_name, layer in model.named_modules():
             if layer == model:
                 continue
-            if isinstance(layer, nn.Sequential): # NOTE: cannot unclude Sequentials because this is basically a repetition of parameter listings
+            if isinstance(layer, nn.Sequential): # NOTE: cannot include Sequentials because this is basically a repetition of parameter listings
                 continue
             layer_complete_name = prefix + layer_name + "."
 
@@ -76,11 +77,12 @@ class ReInitBackbonePlugin(StrategyPlugin):
         """
         Reinitialize after every experience
         """
-        if self.reinit_after_layer_name is None:
-            strategy.model.apply(self.initialize_weights)
-            print("\nRe-Initialized ALL weights!\n")
-        else:
-            # Applying reinitialization partly
-            self.reinit_after(strategy.model, self.reinit_after_layer_name)
-            print("\nRe-Initialized weights after {}!\n".format(self.reinit_after_layer_name))
+        if strategy.clock.train_exp_counter > (self.exp_to_reinit_on -1):
+            if self.reinit_after_layer_name is None:
+                strategy.model.apply(self.initialize_weights)
+                print("\nRe-Initialized ALL weights!\n")
+            else:
+                # Applying reinitialization partly
+                self.reinit_after(strategy.model, self.reinit_after_layer_name)
+                print("\nRe-Initialized weights after {}!\n".format(self.reinit_after_layer_name))
         return

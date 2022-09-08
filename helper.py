@@ -380,7 +380,8 @@ def get_metrics(scenario, args):
         print("\nAdding a probing eval plugin")
         if args.use_lp_eval == "linear":
             print("Using linear probe")
-            metrics.append(LinearProbingAccuracyMetric(train_stream=scenario.train_stream, eval_all=args.lp_eval_all,
+            metrics.append(LinearProbingAccuracyMetric(train_stream=scenario.train_stream, 
+                eval_all=args.lp_eval_all, force_task_eval=args.lp_force_task_eval,
                 num_finetune_epochs=args.lp_finetune_epochs)
             )
         elif args.use_lp_eval == "knn":
@@ -598,7 +599,10 @@ def get_strategy(args, model, eval_plugin, scenario, device,
     
     # Re-Initialize Model (Only for an experiment concerning (A)GEM)
     if args.reinit_model:
-        reinit_plugin = ReInitBackbonePlugin(reinit_after_layer_name=args.reinit_after)
+        reinit_plugin = ReInitBackbonePlugin(
+                exp_to_reinit_on=args.reinit_after_exp, 
+                reinit_after_layer_name=args.reinit_layers_after
+            )
         strategy.plugins.append(reinit_plugin)
         print("Added re-init plugin!")
     

@@ -107,6 +107,7 @@ def get_arg_parser():
     parser.add_argument('--use_lp_eval', type=str, default=None, choices=['linear', 'knn'], help='Usa a probing evaluation metric')
     parser.add_argument('--lp_eval_all', action='store_true', default=False, help='Use all tasks, always, for Linear Probing evaluation.')
     parser.add_argument('--lp_finetune_epochs', type=int, default=5, help='Number of epochs to finetune Linear Probing.')
+    parser.add_argument('--lp_force_task_eval', action='store_true', default=False, help='Force SEPARATE evaluation of all tasks in Linear Probing.')
 
 
     # Strategy
@@ -143,10 +144,10 @@ def get_arg_parser():
     parser.add_argument('--freeze_up_to', type=str, default=None, help='Freeze backbone up to layer name x.')
     # Re-Initialize model after each experience
     parser.add_argument('--reinit_model', action='store_true', default=False, help='Re-initialize model after each experience.')
-    parser.add_argument('--reinit_after', type=str, default=None, help='Reinit backbone after layer name x.')
-    # Add a linear-probing stage in-between experiences for the new task
-    # parser.add_argument('--linear_probing', type=int, default=0, 
-    #     help='Add a linear-probing stage in-between experiences for the new task.')
+    parser.add_argument('--reinit_after_exp', type=int, default=0, help='Re-initialize model after experience n.')
+    parser.add_argument('--reinit_layers_after', type=str, default=None, help='Reinit backbone after layer name x.')
+    parser.add_argument('--reinit_freeze', action='store_true', default=False, help='Freeze backbone after reinit. This is complementary to freeze flag.')
+   
 
     # ER_AGEM_Custom
     parser.add_argument('--sample_size', default=0, type=int, 
