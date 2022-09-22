@@ -58,6 +58,7 @@ from src.methods.agem_standard import AGEMPlugin
 from src.methods.er_geco import GECOERPlugin
 from src.methods.der import DERPlugin
 from src.methods.epoch_adapter import EpochLengthAdapterPlugin
+from src.methods.store_models import StoreModelsPlugin
 
 def args_to_tensorboard(writer, args):
     """
@@ -76,7 +77,7 @@ def args_to_tensorboard(writer, args):
     return
 
 def get_condor_dataset_root(args, dset_name):
-    # If the scatch_dir is not used, return the original dataset root
+    # If the scratch_dir is not used, return the original dataset root
     if not args.use_condor_sc_dir:
         return args.dset_rootpath
 
@@ -85,25 +86,25 @@ def get_condor_dataset_root(args, dset_name):
     if args.dset_rootpath is None:
         orig_dset_root = default_dataset_location(dset_name)
     print("orig_dset_root: {}".format(orig_dset_root))
-    # Get the assigned scatch_dir location
+    # Get the assigned scratch_dir location
     condor_scratch_dir = os.environ.get('_CONDOR_SCRATCH_DIR', None)
-    print("scatch_dir is:", condor_scratch_dir)
+    print("scratch_dir is:", condor_scratch_dir)
 
-    # Define the dataset root on scatch dir
+    # Define the dataset root on scratch dir
     print("dset_name: {}".format(dset_name))
     new_dset_root = os.path.join(condor_scratch_dir, dset_name)
-    print("new dset root on scatch dir:", new_dset_root)
+    print("new dset root on scratch dir:", new_dset_root)
     print(condor_scratch_dir + "/" + dset_name)
 
     # Check if the dataset was alreday downloaded in original root and transfers if true
     if not orig_dset_root is None:
         if os.path.exists(orig_dset_root):
             if not os.path.exists(new_dset_root):    
-                print("Copying existing dataset to condor scatch dir...")
+                print("Copying existing dataset to condor scratch dir...")
                 shutil.copytree(orig_dset_root, new_dset_root)
                 print("done...")
             else:
-                print("Dataset already exists in condor scatch dir")
+                print("Dataset already exists in condor scratch dir")
                 print("Do nothing...")
     else:
         print("No original dataset root! Please specify a dataset rootpath if avalanche automatic download fails...") 
@@ -172,20 +173,37 @@ def get_scenario(args, seed):
             transforms.Normalize((0.4914, 0.4822, 0.4465),
                                  (0.2023, 0.1994, 0.2010))
         ])
-        # Init augmentation transforms (horizontal flip + random crop)
-        aug_transform = transforms.Compose([
+        # Init SimCLR augmentation transforms
+        simclr_transform = transforms.Compose([
+            transforms.RandomResizedCrop(size=(args.input_size[1], args.input_size[2])),
             transforms.RandomHorizontalFlip(),
-            transforms.Pad(2, padding_mode='reflect'),
-            transforms.RandomCrop(32),
+            transforms.RandomApply([
+                transforms.ColorJitter(brightness=0.5, # NOTE: SimCLR uses 0.8
+                                        contrast=0.5, # NOTE: SimCLR uses 0.8
+                                        saturation=0.5, # NOTE: SimCLR uses 0.8
+                                        hue=0.1) # NOTE: SimCLR uses 0.2
+            ], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.GaussianBlur(kernel_size=9),
             transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465),
-                                 (0.2023, 0.1994, 0.2010))
-        ]) 
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+            ])
+
+        # # Init augmentation transforms (horizontal flip + random crop)
+        # aug_transform = transforms.Compose([
+        #     transforms.RandomHorizontalFlip(),
+        #     transforms.Pad(2, padding_mode='reflect'),
+        #     transforms.RandomCrop(32),
+        #     transforms.ToTensor(),
+        #     transforms.Normalize((0.4914, 0.4822, 0.4465),
+        #                          (0.2023, 0.1994, 0.2010))
+        # ]) 
         train_transform = minimal_transform
         test_transform = minimal_transform
 
-        if args.advanced_data_aug:
-            train_transform = aug_transform
+        if args.use_simclr_aug:
+            train_transform = simclr_transform
+            print("Using SimCLR Augmentation")
 
         new_dset_root = get_condor_dataset_root(args, "cifar10")
         scenario = SplitCIFAR10(n_experiences=n_experiences, return_task_id=args.task_incr, seed=seed,
@@ -200,6 +218,8 @@ def get_scenario(args, seed):
         args.input_size = (3, 32, 32)
         n_classes = 100
         n_experiences = 10
+        if not args.num_experiences is None:
+            n_experiences = args.num_experiences
 
         # Init minimal transforms
         minimal_transform = transforms.Compose([
@@ -207,19 +227,28 @@ def get_scenario(args, seed):
             transforms.Normalize((0.5071, 0.4865, 0.4409),
                                 (0.2673, 0.2564, 0.2762))
         ])
-        # Init augmentation transforms (horizontal flip + random crop)
-        aug_transform = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
+        # Init SimCLR augmentation transforms
+        simclr_transform = transforms.Compose([
+            transforms.RandomResizedCrop(size=(args.input_size[1], args.input_size[2])),
             transforms.RandomHorizontalFlip(),
+            transforms.RandomApply([
+                transforms.ColorJitter(brightness=0.5, # NOTE: SimCLR uses 0.8
+                                        contrast=0.5, # NOTE: SimCLR uses 0.8
+                                        saturation=0.5, # NOTE: SimCLR uses 0.8
+                                        hue=0.1) # NOTE: SimCLR uses 0.2
+            ], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.GaussianBlur(kernel_size=9),
             transforms.ToTensor(),
-            transforms.Normalize((0.5071, 0.4865, 0.4409),
-                                (0.2673, 0.2564, 0.2762))
-        ]) 
+            transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762))
+            ])
+
         train_transform = minimal_transform
         test_transform = minimal_transform
 
-        if args.advanced_data_aug:
-            train_transform = aug_transform
+        if args.use_simclr_aug:
+            train_transform = simclr_transform
+            print("Using SimCLR Augmentation")
 
         new_dset_root = get_condor_dataset_root(args, "cifar100")
         scenario = SplitCIFAR100(n_experiences=n_experiences, return_task_id=args.task_incr, seed=seed,
@@ -237,21 +266,43 @@ def get_scenario(args, seed):
         if not args.num_experiences is None:
             n_experiences = args.num_experiences
 
+        # Init minimal transforms
+        minimal_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465),
+                                 (0.2023, 0.1994, 0.2010))
+        ])
+        # Init SimCLR augmentation transforms
+        simclr_transform = transforms.Compose([
+            transforms.ToPILImage(),
+            transforms.RandomResizedCrop(size=(args.input_size[1], args.input_size[2])),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomApply([
+                transforms.ColorJitter(brightness=0.5, # NOTE: SimCLR uses 0.8
+                                        contrast=0.5, # NOTE: SimCLR uses 0.8
+                                        saturation=0.5, # NOTE: SimCLR uses 0.8
+                                        hue=0.1) # NOTE: SimCLR uses 0.2
+            ], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.GaussianBlur(kernel_size=9),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+            ])
+
+        train_transform = minimal_transform
+        test_transform = minimal_transform
+
+        if args.use_simclr_aug:
+            train_transform = simclr_transform
+            print("Using SimCLR Augmentation")        
+
         new_dset_root = get_condor_dataset_root(args, dset_name="miniimgnet")    
         scenario = SplitMiniImageNet(new_dset_root, n_experiences=n_experiences, return_task_id=args.task_incr, # NOTE: args.dset_rootpath as first argument (original code)
                                      seed=seed, per_exp_classes=args.per_exp_classes_dict,
-                                     fixed_class_order=[i for i in range(n_classes)], preprocessed=True)
+                                     fixed_class_order=[i for i in range(n_classes)], preprocessed=True,
+                                     train_transform=train_transform, test_transform=test_transform)
         scenario.n_classes = n_classes
         args.initial_out_features = n_classes // n_experiences  # For Multi-Head
-        
-        # exp = scenario.train_stream[0].dataset
-        # for exp in scenario.train_stream:
-        #     dl = torch.utils.data.DataLoader(exp.dataset, batch_size=3, shuffle=True, num_workers=0)
-        #     for data in dl:
-        #         print(data)
-        #         break
-        #     continue    
-        # import sys;sys.exit()
 
     else:
         raise ValueError("Wrong scenario name.")
@@ -376,6 +427,8 @@ def get_metrics(scenario, args):
         # MinibatchMaxRAM(),
         # GpuUsageMonitor(0),
     ]
+
+    # Linear Probing Evaluation
     if args.use_lp_eval:
         print("\nAdding a probing eval plugin")
         if args.use_lp_eval == "linear":
@@ -397,6 +450,9 @@ def get_optimizer(args, model):
                                     lr=args.lr, weight_decay=args.weight_decay, momentum=args.momentum)
     elif args.optim == 'adam':
         optimizer = torch.optim.Adam(model.parameters(), 
+                                    lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.999))
+    elif args.optim == 'adamW':
+        optimizer = torch.optim.AdamW(model.parameters(), 
                                     lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.999))
     else:
         raise ValueError()
@@ -565,18 +621,23 @@ def get_strategy(args, model, eval_plugin, scenario, device,
 
     else:
         raise NotImplementedError(f"Non existing strategy arg: {args.strategy}")
-
+    
+    #################
     # Additional auxiliary plugins
+    #################
+    # Clip Gradients
     if not args.grad_clip is None:
         add_plugin = GradClipPlugin(clip_value=args.grad_clip)
         strategy.plugins.append(add_plugin)
+    
+    # Freeze backbone
     if args.freeze_backbone:
         strategy.plugins.append(FreezeBackbonePlugin(
             exp_to_freeze_on=args.freeze_after_exp,
             freeze_up_to_layer_name=args.freeze_up_to)
         )
 
-    # Epoch length adapter
+    # Dynamic epoch length adapter
     print("\nNum epochs:", len(args.epochs))
     if len(args.epochs) > 1:
         strategy.plugins.append(
@@ -597,20 +658,21 @@ def get_strategy(args, model, eval_plugin, scenario, device,
             # first_epoch_only=False, first_exp_only=False, verbose=True)
         strategy.plugins.append(lr_plugin)
     
+    # Model Storing to Disk
+    if args.store_models:
+        strategy.plugins.append(StoreModelsPlugin(model_name=args.backbone, model_store_path=args.results_path))
+
     # Re-Initialize Model (Only for an experiment concerning (A)GEM)
     if args.reinit_model:
+        reinit_until_exp = args.reinit_up_to_exp if (not args.reinit_up_to_exp is None) else (scenario.n_experiences+1)
         reinit_plugin = ReInitBackbonePlugin(
                 exp_to_reinit_on=args.reinit_after_exp, 
-                reinit_after_layer_name=args.reinit_layers_after
+                reinit_until_exp=reinit_until_exp,
+                reinit_after_layer_name=args.reinit_layers_after,
+                freeze=args.reinit_freeze
             )
         strategy.plugins.append(reinit_plugin)
         print("Added re-init plugin!")
-    
-    # if args.linear_probing > 0:
-    #     strategy.plugins.append(
-    #         LinearProbePlugin(num_epochs=args.linear_probing)
-    #     )
-    #     print("Added linear probing plugin!")
 
     print(f"Running strategy:{strategy}")
     if hasattr(strategy, 'plugins'):

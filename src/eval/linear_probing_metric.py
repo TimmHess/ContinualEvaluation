@@ -113,7 +113,7 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
         # Update the accuracy measure
 
         self._accuracy.update(out, y, task_labels) # TODO: replace task_labels with strategy.mb_task_id?s
-        print("\n", self._accuracy.result())
+        #print("\n", self._accuracy.result())
         return
 
 
@@ -162,8 +162,8 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
                 self.head_copy.train() # set to train mode (for safety)
                 
                 # Initialize local optimizer for the new head
-                self.local_optim = torch.optim.Adam(self.head_copy.parameters(), lr=0.01, weight_decay=0.0, betas=(0.9, 0.999))
-        
+                #self.local_optim = torch.optim.Adam(self.head_copy.parameters(), lr=0.01, weight_decay=0.0, betas=(0.9, 0.999))
+                self.local_optim = torch.optim.AdamW(self.head_copy.parameters(), lr=1e-3, weight_decay=5e-4, betas=(0.9, 0.999))
                 # Prepare dataet and dataloader
                 if self.eval_all: # NOTE: Override the number of experiences to use in each step with max value
                     self.num_exps_seen = len(self.train_stream) -1 # -1 to make up for +1 in next step

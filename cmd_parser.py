@@ -42,7 +42,7 @@ def get_arg_parser():
     parser.add_argument('--featsize', type=int, default=400,
                         help='The feature size output of the feature extractor.'
                             'The classifier uses this embedding as input.')
-    parser.add_argument('--backbone', type=str, choices=['input', 'mlp', 'resnet18', 'wrn', 'cifar_mlp', 'simple_cnn', 'vgg11'], default='mlp')
+    parser.add_argument('--backbone', type=str, choices=['input', 'mlp', 'resnet18', 'resnet18_big', 'wrn', 'cifar_mlp', 'simple_cnn', 'vgg11'], default='mlp')
     parser.add_argument('--show_backbone_param_names', action='store_true', default=False, help='Show parameter names of the backbone.')
     parser.add_argument('--use_GAP', default=True, type=lambda x: bool(strtobool(x)),
                         help="Use Global Avg Pooling after feature extractor (for Resnet18).")
@@ -60,7 +60,7 @@ def get_arg_parser():
                         help="Use bias in Linear classifier")
 
     # Optimization
-    parser.add_argument('--optim', type=str, choices=['sgd', 'adam'], default='sgd')
+    parser.add_argument('--optim', type=str, choices=['sgd', 'adam', 'adamW'], default='sgd')
     parser.add_argument('--reset_optim_each_exp', action='store_true', default=False, help='Reset optimizer each exp.')
     parser.add_argument('--bs', type=int, default=128, help='Minibatch size.')
     #parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs/step.')
@@ -76,7 +76,8 @@ def get_arg_parser():
     parser.add_argument('--lr_decay', type=float, default=None, help='Multiply factor on milestones.')
     parser.add_argument('--lr_warmup_steps', type=int, default=0, help='Number of warmup steps.')
 
-    parser.add_argument('--advanced_data_aug', action='store_true', default=False, help='Use advanced data augmentation.')
+    #parser.add_argument('--advanced_data_aug', action='store_true', default=False, help='Use advanced data augmentation.')
+    parser.add_argument('--use_simclr_aug', action='store_true', default=False, help='Use SimCLR data augmentation.')
 
     # Continual Evaluation
     parser.add_argument('--eval_with_test_data', default=True, type=lambda x: bool(strtobool(x)),
@@ -105,8 +106,10 @@ def get_arg_parser():
     parser.add_argument('--reduced_tracking', action='store_true', default=False, help='Use reduced tracking metrics.')
     #parser.add_argument('--use_lp_eval', action='store_true', default=False, help='Use Linear Probing in evaluation.')
     parser.add_argument('--use_lp_eval', type=str, default=None, choices=['linear', 'knn'], help='Usa a probing evaluation metric')
+    parser.add_argument('--lp_optim', type=str, choices=['sgd', 'adamW'], default='sgd', help='Optimizer for linear probing.')
+    parser.add_argument('--lp_lr', type=float, default=1e-3, help='Learning rate for linear probing.')
     parser.add_argument('--lp_eval_all', action='store_true', default=False, help='Use all tasks, always, for Linear Probing evaluation.')
-    parser.add_argument('--lp_finetune_epochs', type=int, default=5, help='Number of epochs to finetune Linear Probing.')
+    parser.add_argument('--lp_finetune_epochs', type=int, default=10, help='Number of epochs to finetune Linear Probing.')
     parser.add_argument('--lp_force_task_eval', action='store_true', default=False, help='Force SEPARATE evaluation of all tasks in Linear Probing.')
 
 
@@ -145,9 +148,12 @@ def get_arg_parser():
     # Re-Initialize model after each experience
     parser.add_argument('--reinit_model', action='store_true', default=False, help='Re-initialize model after each experience.')
     parser.add_argument('--reinit_after_exp', type=int, default=0, help='Re-initialize model after experience n.')
+    parser.add_argument('--reinit_up_to_exp', type=int, default=None, help='Re-initialize model only up to experience n.')
     parser.add_argument('--reinit_layers_after', type=str, default=None, help='Reinit backbone after layer name x.')
     parser.add_argument('--reinit_freeze', action='store_true', default=False, help='Freeze backbone after reinit. This is complementary to freeze flag.')
    
+    # Store model every experience
+    parser.add_argument('--store_models', action='store_true', default=False, help='Store model after each experience.')
 
     # ER_AGEM_Custom
     parser.add_argument('--sample_size', default=0, type=int, 

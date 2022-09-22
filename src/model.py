@@ -36,9 +36,14 @@ def get_feat_size(block, spatial_size, in_channels=3):
 
     x = torch.randn(2, in_channels, spatial_size, spatial_size)
     out = block(x)
-    num_feat = out.size(1)
-    spatial_dim_x = out.size(2)
-    spatial_dim_y = out.size(3)
+    if len(out.size()) == 2: # NOTE: catches the case where the block is a linear layer
+        num_feat = out.size(1)
+        spatial_dim_x = 1
+        spatial_dim_y = 1
+    else:
+        num_feat = out.size(1)
+        spatial_dim_x = out.size(2)
+        spatial_dim_y = out.size(3)
 
     return num_feat, spatial_dim_x, spatial_dim_y
 
@@ -401,17 +406,22 @@ class ResNet(nn.Module):
         self.layer3 = self._make_layer(block, nf * 4, num_blocks[2], stride=2)
         self.layer4 = self._make_layer(block, nf * 8, num_blocks[3], stride=2)
 
+        self.feature_size = None
+
         assert len(input_size) >= 3
         input_size = input_size[-3:]  # Only care about last 3
 
-        if input_size == (3, 32, 32):  # Cifar10
-            self.feature_size = 160 if global_pooling else 2560
-        elif input_size == (3, 84, 84):  # Mini-Imagenet
-            self.feature_size = 640 if global_pooling else 19360
-        elif input_size == (3, 96, 96):  # TinyDomainNet
-            self.feature_size = 1440 if global_pooling else 23040
+        if nf==20:
+            if input_size == (3, 32, 32):  # Cifar10
+                self.feature_size = 160 if global_pooling else 2560
+            elif input_size == (3, 84, 84):  # Mini-Imagenet
+                self.feature_size = 640 if global_pooling else 19360
+            elif input_size == (3, 96, 96):  # TinyDomainNet
+                self.feature_size = 1440 if global_pooling else 23040
+            else:
+                raise ValueError(f"Input size not recognized: {input_size}")
         else:
-            raise ValueError(f"Input size not recognized: {input_size}")
+            pass
 
         # self.linear = nn.Linear(self.feature_size, num_classes, bias=bias)
 
@@ -439,8 +449,10 @@ class ResNet(nn.Module):
 
 
 def ResNet18feat(input_size, nf=20, global_pooling=False):
-    return ResNet(BasicBlock, [2, 2, 2, 2], nf, global_pooling=global_pooling, input_size=input_size)
-
+    model_backbone = ResNet(BasicBlock, [2, 2, 2, 2], nf, global_pooling=global_pooling, input_size=input_size)
+    enc_channels, enc_spatial_dim_x, enc_spatial_dim_y = get_feat_size(model_backbone, spatial_size=input_size[1], in_channels=input_size[0])
+    model_backbone.feature_size = enc_channels * enc_spatial_dim_x * enc_spatial_dim_y
+    return model_backbone
 
 
 '''
@@ -551,7 +563,7 @@ class WRN(nn.Module):
         ]))
 
         self.enc_channels, self.enc_spatial_dim_x, self.enc_spatial_dim_y = \
-            get_feat_size(self.encoder, self.input_size[1], self.input_size[0])
+            get_feat_size(self.encoder, spatial_size=self.input_size[1], in_channels=self.input_size[0])
 
         self.feature_size = self.enc_channels * self.enc_spatial_dim_x * self.enc_spatial_dim_y
 
@@ -639,6 +651,8 @@ def _get_feat_extr(args):
         feat_extr = VGG11Feat(input_size=args.input_size)
     elif args.backbone == "resnet18":
         feat_extr = ResNet18feat(nf=20, global_pooling=args.use_GAP, input_size=args.input_size)
+    elif args.backbone == "resnet18_big":
+        feat_extr = ResNet18feat(nf=64, global_pooling=args.use_GAP, input_size=args.input_size)
     elif args.backbone == 'wrn':
         feat_extr = WRNfeat(args.input_size, wrn_embedding_size=args.wrn_embedding_size, widen_factor=args.wrn_widen_factor, 
             depth=args.wrn_depth, use_bn=False, use_max_pool=args.use_maxpool)

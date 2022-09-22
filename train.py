@@ -2,10 +2,10 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from avalanche.training.strategies.base_strategy import BaseStrategy
+
 
 print("Loading libs...")
-
+from avalanche.training.strategies.base_strategy import BaseStrategy
 import os
 import math
 from pathlib import Path
@@ -36,7 +36,6 @@ from src.eval.minibatch_logging import StrategyAttributeAdderPlugin, StrategyAtt
 
 import helper
 from cmd_parser import get_arg_parser
-
 print("loading libs done..")
 
 
@@ -164,4 +163,3 @@ for experience in scenario.train_stream:
     if args.reset_optim_each_exp:
         strategy.optimizer = helper.get_optimizer(args, strategy.model)
         print("\nRESET OPTIMIZER")
-
