@@ -4,22 +4,16 @@ from __future__ import print_function
 
 import os
 import shutil
-from pathlib import Path
 from typing import List
-import uuid
 import torch
-from distutils.util import strtobool
 
-from torch.optim.lr_scheduler import MultiStepLR, LinearLR
 from torchvision import transforms
 
 # Avalanche
-from avalanche.logging import TextLogger, TensorboardLogger, WandBLogger
 from avalanche.benchmarks import SplitMNIST, SplitCIFAR10, RotatedMNIST, PermutedMNIST
 from avalanche.benchmarks.classic import SplitCIFAR100
 from avalanche.evaluation.metrics import ExperienceForgetting, StreamForgetting, accuracy_metrics, loss_metrics, \
     StreamConfusionMatrix, timing_metrics
-from avalanche.logging import InteractiveLogger
 from avalanche.training.plugins import EvaluationPlugin, ReplayPlugin
 from avalanche.training.plugins import GEMPlugin, AGEMPlugin
 from avalanche.training.strategies import Naive
@@ -28,8 +22,6 @@ from avalanche.training.strategies.base_strategy import BaseStrategy
 from avalanche.benchmarks.datasets import default_dataset_location
 
 # CUSTOM
-from src.utils import MetricOverSeed
-from src.model import FeatClassifierModel, MLPfeat, ResNet18feat, L2NormalizeLayer
 from src.eval.continual_eval import ContinualEvaluationPhasePlugin
 from src.eval.continual_eval_metrics import TaskTrackingLossPluginMetric, \
     TaskTrackingGradnormPluginMetric, TaskTrackingFeatureDriftPluginMetric, TaskTrackingAccuracyPluginMetric, \
@@ -52,7 +44,6 @@ from src.methods.backbone_freeze import FreezeBackbonePlugin
 from src.methods.lr_warmup_scheduler import LRWarmupScheduler, LinearWarmup
 from src.methods.er_agem import ERAGEMPlugin
 from src.methods.reinit_backbone import ReInitBackbonePlugin
-from src.methods.linear_probing import LinearProbePlugin
 from src.methods.agem_bgd import AGEM_BGD
 from src.methods.agem_standard import AGEMPlugin
 from src.methods.er_geco import GECOERPlugin
@@ -114,16 +105,40 @@ def get_condor_dataset_root(args, dset_name):
 def get_scenario(args, seed):
     print(f"\n[SCENARIO] {args.scenario}, Task Incr = {args.task_incr}")
 
+    # Prepare general transforms
     train_transform = None
     test_transform = None
 
-    # DEBUG: TODO: this has to be called in every scenario prior to creating it
-    # (sadly cannot be called upfront because need to map the "dataset_name" for original data root lookup from avalanche)
-    # new_dset_root = get_condor_dataset_root(args, "mnist")
-    # print("new dset root:", new_dset_root)
-
-    if args.scenario == 'smnist':  #
+    if args.scenario in ["smnist", "pmnist", "rotmnist"]:
         args.input_size = (1, 28, 28)
+    elif args.scenario in ["cifar10", "cifar100", "digits"]:
+        args.input_size = (3, 32, 32)
+    elif args.scenario in ["minidomainnet"]:
+        args.input_size = (3, 96, 96)
+    elif args.scenario in ["miniimgnet"]:
+        args.input_size = (3, 84, 84)
+    
+    if not args.overwrite_input_size is None:
+        args.input_size = (args.input_size[0], args.overwrite_input_size[0], args.overwrite_input_size[1])
+
+    to_pil = transforms.Compose([transforms.ToPILImage()])
+    resize = transforms.Compose([transforms.Resize(size=(args.input_size[1], args.input_size[2]), interpolation=transforms.InterpolationMode.NEAREST)])
+    sim_clr = transforms.Compose([
+        transforms.RandomResizedCrop(size=(args.input_size[1], args.input_size[2])),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomApply([
+            transforms.ColorJitter(brightness=0.5, # NOTE: SimCLR uses 0.8
+                                    contrast=0.5, # NOTE: SimCLR uses 0.8
+                                    saturation=0.5, # NOTE: SimCLR uses 0.8
+                                    hue=0.1) # NOTE: SimCLR uses 0.2
+        ], p=0.8),
+        transforms.RandomGrayscale(p=0.2),
+        transforms.GaussianBlur(kernel_size=9),
+    ])
+    to_tensor = transforms.Compose([transforms.ToTensor()])
+
+    # Prepare datasets/scenarios
+    if args.scenario == 'smnist':  #
         n_classes = 10
         n_experiences = 5
         new_dset_root = get_condor_dataset_root(args, "mnist")
@@ -134,14 +149,12 @@ def get_scenario(args, seed):
 
     elif args.scenario == 'pmnist':  #
         assert not args.task_incr, "Domain incremental can't be multi-head."
-        args.input_size = (1, 28, 28)
         n_classes = 10
         scenario = PermutedMNIST(n_experiences=5, seed=seed)
         scenario.n_classes = n_classes
 
     elif args.scenario == 'rotmnist':  # Domain-incremental
         assert not args.task_incr, "Domain incremental can't be multi-head."
-        args.input_size = (1, 28, 28)
         n_classes = 10
         n_experiences = 20
         scenario = RotatedMNIST(n_experiences=n_experiences,
@@ -150,61 +163,30 @@ def get_scenario(args, seed):
 
     elif args.scenario == 'digits':  # Domain-incremental
         assert not args.task_incr, "Domain incremental can't be multi-head."
-        args.input_size = (3, 32, 32)
         n_classes = 10
         scenario = DigitsBenchmark()
         scenario.n_classes = n_classes
 
     elif args.scenario == 'minidomainnet':
         assert not args.task_incr, "Domain incremental can't be multi-head."
-        args.input_size = (3, 96, 96)
         n_classes = 126
         scenario = MiniDomainNetBenchmark(dataset_root=args.dset_rootpath)
         scenario.n_classes = n_classes
 
+    # CIFAR10
     elif args.scenario == 'cifar10':
-        args.input_size = (3, 32, 32)
         n_classes = 10
         n_experiences = 5
-
-        # Init minimal transforms
-        minimal_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465),
-                                 (0.2023, 0.1994, 0.2010))
-        ])
-        # Init SimCLR augmentation transforms
-        simclr_transform = transforms.Compose([
-            transforms.RandomResizedCrop(size=(args.input_size[1], args.input_size[2])),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomApply([
-                transforms.ColorJitter(brightness=0.5, # NOTE: SimCLR uses 0.8
-                                        contrast=0.5, # NOTE: SimCLR uses 0.8
-                                        saturation=0.5, # NOTE: SimCLR uses 0.8
-                                        hue=0.1) # NOTE: SimCLR uses 0.2
-            ], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.GaussianBlur(kernel_size=9),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-            ])
-
-        # # Init augmentation transforms (horizontal flip + random crop)
-        # aug_transform = transforms.Compose([
-        #     transforms.RandomHorizontalFlip(),
-        #     transforms.Pad(2, padding_mode='reflect'),
-        #     transforms.RandomCrop(32),
-        #     transforms.ToTensor(),
-        #     transforms.Normalize((0.4914, 0.4822, 0.4465),
-        #                          (0.2023, 0.1994, 0.2010))
-        # ]) 
+ 
+        # Compose transforms
+        normalize = transforms.Compose([transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
+        minimal_transform = transforms.Compose([resize, to_tensor, normalize])
         train_transform = minimal_transform
         test_transform = minimal_transform
-
         if args.use_simclr_aug:
-            train_transform = simclr_transform
             print("Using SimCLR Augmentation")
-
+            train_transform = transforms.Compose([resize, sim_clr, to_tensor, normalize])
+            
         new_dset_root = get_condor_dataset_root(args, "cifar10")
         scenario = SplitCIFAR10(n_experiences=n_experiences, return_task_id=args.task_incr, seed=seed,
                                 fixed_class_order=[i for i in range(n_classes)],
@@ -213,42 +195,26 @@ def get_scenario(args, seed):
                                 dataset_root=new_dset_root)
         scenario.n_classes = n_classes
         args.initial_out_features = n_classes // n_experiences  # For Multi-Head
-
+ 
+    # CIFAR100
     elif args.scenario == 'cifar100':
-        args.input_size = (3, 32, 32)
         n_classes = 100
         n_experiences = 10
         if not args.num_experiences is None:
             n_experiences = args.num_experiences
 
-        # Init minimal transforms
-        minimal_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5071, 0.4865, 0.4409),
-                                (0.2673, 0.2564, 0.2762))
-        ])
-        # Init SimCLR augmentation transforms
-        simclr_transform = transforms.Compose([
-            transforms.RandomResizedCrop(size=(args.input_size[1], args.input_size[2])),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomApply([
-                transforms.ColorJitter(brightness=0.5, # NOTE: SimCLR uses 0.8
-                                        contrast=0.5, # NOTE: SimCLR uses 0.8
-                                        saturation=0.5, # NOTE: SimCLR uses 0.8
-                                        hue=0.1) # NOTE: SimCLR uses 0.2
-            ], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.GaussianBlur(kernel_size=9),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762))
-            ])
+        
+        normalize = transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762))
+        if "_pt" in args.backbone:
+            normalize = transforms.Compose([transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
 
+        minimal_transform = transforms.Compose([resize, to_tensor, normalize])       
         train_transform = minimal_transform
         test_transform = minimal_transform
 
         if args.use_simclr_aug:
-            train_transform = simclr_transform
             print("Using SimCLR Augmentation")
+            train_transform = transforms.Compose([resize, sim_clr, to_tensor, normalize])
 
         new_dset_root = get_condor_dataset_root(args, "cifar100")
         scenario = SplitCIFAR100(n_experiences=n_experiences, return_task_id=args.task_incr, seed=seed,
@@ -259,42 +225,23 @@ def get_scenario(args, seed):
         scenario.n_classes = n_classes
         args.initial_out_features = n_classes // n_experiences
 
+    # MiniImageNet
     elif args.scenario == 'miniimgnet':
-        args.input_size = (3, 84, 84)
         n_classes = 100
         n_experiences = 20
         if not args.num_experiences is None:
             n_experiences = args.num_experiences
 
-        # Init minimal transforms
-        minimal_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465),
-                                 (0.2023, 0.1994, 0.2010))
-        ])
-        # Init SimCLR augmentation transforms
-        simclr_transform = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.RandomResizedCrop(size=(args.input_size[1], args.input_size[2])),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomApply([
-                transforms.ColorJitter(brightness=0.5, # NOTE: SimCLR uses 0.8
-                                        contrast=0.5, # NOTE: SimCLR uses 0.8
-                                        saturation=0.5, # NOTE: SimCLR uses 0.8
-                                        hue=0.1) # NOTE: SimCLR uses 0.2
-            ], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.GaussianBlur(kernel_size=9),
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-            ])
-
+        normalize = transforms.Compose([transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))])
+        if "_pt" in args.backbone:
+            normalize = transforms.Compose([transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
+        
+        minimal_transform = transforms.Compose([to_pil, resize, to_tensor, normalize])
         train_transform = minimal_transform
         test_transform = minimal_transform
-
         if args.use_simclr_aug:
-            train_transform = simclr_transform
-            print("Using SimCLR Augmentation")        
+            print("Using SimCLR Augmentation")  
+            train_transform = transforms.Compose([to_pil, resize, sim_clr, to_tensor, normalize])
 
         new_dset_root = get_condor_dataset_root(args, dset_name="miniimgnet")    
         scenario = SplitMiniImageNet(new_dset_root, n_experiences=n_experiences, return_task_id=args.task_incr, # NOTE: args.dset_rootpath as first argument (original code)
@@ -433,9 +380,10 @@ def get_metrics(scenario, args):
         print("\nAdding a probing eval plugin")
         if args.use_lp_eval == "linear":
             print("Using linear probe")
-            metrics.append(LinearProbingAccuracyMetric(train_stream=scenario.train_stream, 
+            metrics.append(LinearProbingAccuracyMetric(train_stream=scenario.train_stream, test_stream=scenario.test_stream,
                 eval_all=args.lp_eval_all, force_task_eval=args.lp_force_task_eval,
-                num_finetune_epochs=args.lp_finetune_epochs)
+                num_finetune_epochs=args.lp_finetune_epochs,
+                skip_initial_eval=args.skip_initial_eval)
             )
         elif args.use_lp_eval == "knn":
             print("Using knn probe")

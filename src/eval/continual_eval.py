@@ -316,6 +316,9 @@ class ContinualEvaluationPhasePlugin(StrategyPlugin):
         strategy.is_training = prev_state[3]
 
         # restore each layer's training mode to original
-        for name, layer in strategy.model.named_modules():
-            prev_mode = prev_training_modes[name]
-            layer.train(mode=prev_mode)
+        for name, layer in strategy.model.named_modules(): # NOTE: in multi-task training the classifier will have additional heads after first eval!
+            try: 
+                prev_mode = prev_training_modes[name]
+                layer.train(mode=prev_mode)
+            except:
+                print("Layer: {} not found in prev_training_modes".format(name))

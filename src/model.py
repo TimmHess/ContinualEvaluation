@@ -20,6 +20,8 @@ import torch.nn as nn
 from torch.nn import Module
 from torch.nn.functional import relu, avg_pool2d, max_pool2d
 
+from torchvision.models import resnet18, ResNet18_Weights
+
 from torchinfo import summary
 
 from avalanche.models.dynamic_modules import MultiHeadClassifier
@@ -448,10 +450,37 @@ class ResNet(nn.Module):
         return out
 
 
-def ResNet18feat(input_size, nf=20, global_pooling=False):
-    model_backbone = ResNet(BasicBlock, [2, 2, 2, 2], nf, global_pooling=global_pooling, input_size=input_size)
+class ResNetPT(nn.Module):
+    def __init__(self, pretrained=False):
+        super(ResNetPT, self).__init__()
+        self.pretrained = pretrained
+        if self.pretrained:
+            print("\nUsing pretrained resnet18 model weights from pytorch!")
+            self.features = torch.nn.Sequential(*(list((resnet18(weights=ResNet18_Weights.DEFAULT)).children())[:-1]))
+        else:
+            print("\nUsing resnet18 as by pytorch!")
+            self.features = torch.nn.Sequential(*(list((resnet18()).children())[:-1]))
+        self.feature_size = None
+        return
+
+    def forward(self, x):
+        assert len(x.shape) == 4, "Assuming x.view(bsz, C, W, H)"
+        out = self.features(x)
+        out = out.view(out.size(0), -1)  # Flatten
+        return out
+
+
+
+def ResNet18feat(input_size, nf=20, global_pooling=False, use_torch_version=False, pretrained=False):
+    model_backbone = None
+    if use_torch_version:
+        model_backbone = ResNetPT(pretrained=pretrained)
+        print("\nWill use pretrained model")
+    else:
+        model_backbone = ResNet(BasicBlock, [2, 2, 2, 2], nf, global_pooling=global_pooling, input_size=input_size)
     enc_channels, enc_spatial_dim_x, enc_spatial_dim_y = get_feat_size(model_backbone, spatial_size=input_size[1], in_channels=input_size[0])
     model_backbone.feature_size = enc_channels * enc_spatial_dim_x * enc_spatial_dim_y
+    print("\nModel Feature Size:", model_backbone.feature_size)
     return model_backbone
 
 
@@ -625,7 +654,6 @@ def get_model(args, n_classes):
     feat_extr = _get_feat_extr(args)  # Feature extractor
     classifier = _get_classifier(args, n_classes, feat_extr.feature_size)  # Classifier
     model = FeatClassifierModel(feat_extr, classifier)  # Combined model
-
     print("\nBackbone Summary:")
     summary(feat_extr, input_size=(1, args.input_size[0], args.input_size[1], args.input_size[1]))
     if args.show_backbone_param_names:
@@ -653,6 +681,10 @@ def _get_feat_extr(args):
         feat_extr = ResNet18feat(nf=20, global_pooling=args.use_GAP, input_size=args.input_size)
     elif args.backbone == "resnet18_big":
         feat_extr = ResNet18feat(nf=64, global_pooling=args.use_GAP, input_size=args.input_size)
+    elif args.backbone == "resnet18_big_t": # torch version
+        feat_extr = ResNet18feat(nf=64, global_pooling=args.use_GAP, input_size=args.input_size, use_torch_version=True, pretrained=False)
+    elif args.backbone == "resnet18_big_pt": # torch version - pretrained
+        feat_extr = ResNet18feat(nf=64, global_pooling=args.use_GAP, input_size=args.input_size, use_torch_version=True, pretrained=True)
     elif args.backbone == 'wrn':
         feat_extr = WRNfeat(args.input_size, wrn_embedding_size=args.wrn_embedding_size, widen_factor=args.wrn_widen_factor, 
             depth=args.wrn_depth, use_bn=False, use_max_pool=args.use_maxpool)

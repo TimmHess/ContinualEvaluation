@@ -19,6 +19,8 @@ from avalanche.models.dynamic_modules import MultiHeadClassifier, IncrementalCla
 from src.utils import get_grad_normL2
 from src.model import initialize_weights
 
+from src.eval.continual_eval import ContinualEvaluationPhasePlugin # NOTE: used to call 'get_strategy_state' and 'restore_strategy_'
+
 import copy
 
 from tqdm import tqdm
@@ -33,8 +35,8 @@ TResult = TypeVar('TResult')
     # in avalnache this could be, e.g. MinibatchAccuracy...
 
 class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
-    def __init__(self, train_stream, eval_all=False, force_task_eval=False,
-            num_finetune_epochs=1, batch_size=32, num_workers=0):
+    def __init__(self, train_stream, test_stream, eval_all=False, force_task_eval=False,
+            num_finetune_epochs=1, batch_size=32, num_workers=0, skip_initial_eval=False):
         self._accuracy = Accuracy() # metric calculation container
         super(LinearProbingAccuracyMetric, self).__init__(
             self._accuracy, reset_at='experience', emit_at='experience',
@@ -44,6 +46,7 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
         self.num_workers = num_workers
 
         self.train_stream = train_stream
+        self.test_stream = test_stream
         self.num_exps_seen = 0
         self.num_fintune_epochs = num_finetune_epochs
 
@@ -55,6 +58,12 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
         self.eval_all = eval_all # flag to indicate forced evaluation on all experiences for each tasks (including yet unseed ones)
         self.force_task_eval = force_task_eval # flag to indicate forced evaluation on all experiences for the current task (including yet unseed ones)
         self.initial_out_features = None
+
+        self.skip_initial_eval = skip_initial_eval
+        self.is_initial_eval_run = False
+        self._prev_state = None
+        self._prev_training_modes = None
+        # NOTE: required to reset the training scheme after calling eval in train mode..
         return
 
     def __str__(self):
@@ -117,10 +126,26 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
         return
 
 
+    def before_training_exp(self, strategy: 'BaseStrategy'):
+        # Check exp_clock if this is the '0th' exp and do a linear probing step 
+        if strategy.clock.train_exp_counter == 0 and not self.skip_initial_eval:
+            print("\nDoing linear probing on random-weighted model")
+            self.is_initial_eval_run = True # Set flag to indicate that this is a special evaluation run
+           
+            # Need to store the state of the trainer and model befor running eval inside train-loop
+            self._prev_state, self._prev_training_modes = ContinualEvaluationPhasePlugin.get_strategy_state(strategy)
+            
+            # Trigger the evaluation by calling strategy.eval()? -> This will run entire evaluation... 
+            print("Triggering initial evaluation before training starts...")
+            strategy.eval(self.test_stream)
+        return
+
+
     def before_eval_exp(self, strategy: 'BaseStrategy'):
         # Check if LinearProbe already trained
         if not self.training_complete:
-            # Set flag that will prevent retraining of LinearProbe for each sub-task
+            # Set flag that will prevent retraining of LinearProbe for each sub-task 
+            # NOTE: (it is enought to train once because this will include all sub-tasks already)
             self.training_complete = True
             print("\nLocked LinearProbe Training")
             # Initialize and prepare the linear probing head
@@ -157,13 +182,12 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
    
                 # Move novel probe head to common device and (re-)initialize
                 self.head_copy = self.head_copy.to(strategy.device)
-                print("Reinitializing weights...")
+                print("Reinitializing weights of the head...")
                 initialize_weights(self.head_copy)
                 self.head_copy.train() # set to train mode (for safety)
                 
                 # Initialize local optimizer for the new head
-                #self.local_optim = torch.optim.Adam(self.head_copy.parameters(), lr=0.01, weight_decay=0.0, betas=(0.9, 0.999))
-                self.local_optim = torch.optim.AdamW(self.head_copy.parameters(), lr=1e-3, weight_decay=5e-4, betas=(0.9, 0.999))
+                self.local_optim = torch.optim.AdamW(self.head_copy.parameters(), lr=1e-3, weight_decay=5e-4, betas=(0.9, 0.999)) # #self.local_optim = torch.optim.Adam(self.head_copy.parameters(), lr=0.01, weight_decay=0.0, betas=(0.9, 0.999))
                 # Prepare dataet and dataloader
                 if self.eval_all: # NOTE: Override the number of experiences to use in each step with max value
                     self.num_exps_seen = len(self.train_stream) -1 # -1 to make up for +1 in next step
@@ -183,7 +207,9 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
                 print("Collected dataset and loader...")
                 
                 # Train the new head(s)
-                print("Training new head(s)...", "num heads:", len(self.head_copy.classifiers))
+                if isinstance(self.head_copy, MultiTaskModule):
+                    print("Training new head(s)...", "num heads:", len(self.head_copy.classifiers))
+                    
                 for _ in tqdm(range(self.num_fintune_epochs)):
                     for _, mbatch in enumerate(lp_dataloader):
                         self.local_optim.zero_grad()
@@ -225,6 +251,14 @@ class LinearProbingAccuracyMetric(GenericPluginMetric[float]):
         print("\nReleased Flag for Linear Probe Training")
         # Increase the counter on seen experiences
         self.num_exps_seen += 1 
+        # In case of initial evaluation, do not increase the exp_seen counter
+        if self.is_initial_eval_run:
+            #self.num_exps_seen -= 1 # NOTE: this will be done by 'restore_strategy* call
+            # Reset the state of the continual learner
+            assert(not self._prev_state is None)
+            assert(not self._prev_training_modes is None)
+            ContinualEvaluationPhasePlugin.restore_strategy_(strategy, self._prev_state, self._prev_training_modes)
+            self.is_initial_eval_run = False # Reset flag
         return
 
 

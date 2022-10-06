@@ -42,7 +42,9 @@ def get_arg_parser():
     parser.add_argument('--featsize', type=int, default=400,
                         help='The feature size output of the feature extractor.'
                             'The classifier uses this embedding as input.')
-    parser.add_argument('--backbone', type=str, choices=['input', 'mlp', 'resnet18', 'resnet18_big', 'wrn', 'cifar_mlp', 'simple_cnn', 'vgg11'], default='mlp')
+    parser.add_argument('--backbone', type=str, choices=['input', 'mlp', 'resnet18', 'resnet18_big', 'resnet18_big_t', 'resnet18_big_pt', 
+                                                        'wrn', 'cifar_mlp', 'simple_cnn', 'vgg11'], default='mlp')
+    parser.add_argument('--overwrite_input_size', type=int, nargs='+', default=None, help='Overwrite data input_size the backbone and add respective transform to match data.')
     parser.add_argument('--show_backbone_param_names', action='store_true', default=False, help='Show parameter names of the backbone.')
     parser.add_argument('--use_GAP', default=True, type=lambda x: bool(strtobool(x)),
                         help="Use Global Avg Pooling after feature extractor (for Resnet18).")
@@ -91,6 +93,7 @@ def get_arg_parser():
     parser.add_argument('--eval_max_iterations', type=int, default=-1, help='Max nb of iterations for continual eval.\
                         After this number of iters is reached, no more continual eval is performed. Default value \
                         of -1 means no limit.')
+    parser.add_argument('--skip_initial_eval', action='store_true', default=False, help='Skip initial eval.')
 
     # Expensive additional continual logging
     parser.add_argument('--track_class_stats', default=False, type=lambda x: bool(strtobool(x)),
